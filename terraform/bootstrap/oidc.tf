@@ -83,6 +83,9 @@ data "aws_iam_policy_document" "github_actions_assume_role" {
     # Day 7 tightens this: the prod deploy gets its OWN role, conditioned on
     # the `environment` claim, so a PR can plan but only an approved
     # deployment can touch production.
+  }
+}
+
 resource "aws_iam_role" "github_actions" {
   name               = "gateflow-github-actions"
   description        = "Assumed by GitHub Actions via OIDC to run Terraform and push images."
