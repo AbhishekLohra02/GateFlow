@@ -23,7 +23,7 @@ terraform {
     # This surprises everyone once. The escape hatch for real multi-env
     # setups is partial configuration: omit the key here and pass
     # `-backend-config=key=...` at init time.
-    bucket = "gateflow-tfstate-ACCOUNT_ID"
+    bucket = "gateflow-tfstate-355421126727"
 
     # The path to THIS stack's state file inside the bucket. Every stack
     # gets its own key. That is what keeps dev, staging, prod and shared
