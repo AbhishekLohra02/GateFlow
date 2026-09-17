@@ -111,9 +111,29 @@ session.
 
 ---
 
-## To fill in as we build
+## Concrete values (Phase 1)
 
-- AWS account ID / region
-- ECR repository URI
-- Terraform state bucket name
-- Architecture diagram (add once the Terraform exists)
+| | |
+|---|---|
+| AWS account | `355421126727` |
+| Region | `us-east-1` |
+| ECR repository | `355421126727.dkr.ecr.us-east-1.amazonaws.com/gateflow-app` |
+| Terraform state bucket | `gateflow-tfstate-355421126727` |
+| CI role | `arn:aws:iam::355421126727:role/gateflow-github-actions` |
+
+State layout inside the bucket - one key per stack, which is what makes a
+`destroy` in one environment unable to see another's resources:
+
+```
+gateflow-tfstate-355421126727/
+  bootstrap/terraform.tfstate     state bucket, OIDC provider, CI role
+  shared/terraform.tfstate        ECR
+  dev|staging|prod/...            per-environment (Day 3+)
+```
+
+Locking is S3-native (`use_lockfile`, Terraform >= 1.10) rather than a
+DynamoDB table - DynamoDB-based locking is deprecated.
+
+## Still to fill in
+
+- Architecture diagram (add once the network and ECS Terraform exist)

@@ -197,11 +197,17 @@ DynamoDB.** This supersedes the DynamoDB references elsewhere in this file
 and in docs/architecture.md. DynamoDB-based locking is deprecated; S3 does
 it natively via conditional writes. No lock table is created.
 
-**Day 2 progress (2026-09-17).** Bootstrap applied from CloudShell:
+**Day 2 COMPLETE (2026-09-17).** Bootstrap applied from CloudShell:
 S3 state bucket `gateflow-tfstate-355421126727` (versioned, encrypted,
 public access blocked, `prevent_destroy`), GitHub OIDC provider, and the
 `gateflow-github-actions` role. Bootstrap state migrated into that bucket.
-CI now authenticates to AWS keylessly and plans the shared stack green.
+CI authenticates to AWS keylessly; `terraform-apply` (main only, gated on
+both PR jobs) created ECR
+`355421126727.dkr.ecr.us-east-1.amazonaws.com/gateflow-app`. A PR plans, a
+merge applies - that asymmetry is the gate.
+
+Open: `.terraform.lock.hcl` is still not committed (CI regenerates it each
+run); CI role still has AdministratorAccess, narrows on Day 8.
 Account ID `355421126727`.
 
 **Two OIDC gotchas that cost real time - do not re-learn these:**
@@ -227,8 +233,8 @@ session since /tmp is wiped.
 
 ## Phase 1 day sequence
 1. Verify the container (build/run/curl/whoami) + unit tests. DONE
-2. Terraform fundamentals; remote state backend (S3) + ECR repo. <- HERE
-3. Network module: VPC, public subnet, IGW, security group.
+2. Terraform fundamentals; remote state backend (S3) + ECR repo. DONE
+3. Network module: VPC, public subnet, IGW, security group. <- HERE
 4. ECS module: cluster, EC2 capacity, task definition, service. Dev up.
 5. Replicate to staging/prod as separate stacks with separate state.
 6. GitHub Actions: OIDC to AWS, PR checks workflow.
