@@ -28,6 +28,19 @@ resource "aws_iam_openid_connect_provider" "github" {
 # The trust policy - WHO may assume the role. This is the security boundary
 # of the entire pipeline, so it is built as a data source where every
 # condition is explicit and reviewable in the diff.
+locals {
+  # GitHub's IMMUTABLE subject format:
+  #   repo:<owner>@<owner_id>/<repo>@<repo_id>:<context>
+  # e.g. repo:AbhishekLohra02@217813897/GateFlow@1374185994:pull_request
+  #
+  # Built from the same variables as the ID conditions below so the two can
+  # never drift apart.
+  github_owner = split("/", var.github_repository)[0]
+  github_repo  = split("/", var.github_repository)[1]
+
+  oidc_sub_prefix = "repo:${local.github_owner}@${var.github_repository_owner_id}/${local.github_repo}@${var.github_repository_id}"
+}
+
 data "aws_iam_policy_document" "github_actions_assume_role" {
   statement {
     effect  = "Allow"
@@ -74,6 +87,28 @@ data "aws_iam_policy_document" "github_actions_assume_role" {
       test     = "StringEquals"
       variable = "token.actions.githubusercontent.com:repository_id"
       values   = [var.github_repository_id]
+    }
+
+    # AWS REQUIRES this one. A trust policy for a GitHub OIDC provider is
+    # rejected outright unless it constrains `sub` or `job_workflow_ref` to
+    # something narrower than "*":
+    #
+    #   MalformedPolicyDocument: Trust policy ... must evaluate ...
+    #   token.actions.githubusercontent.com:sub or ...:job_workflow_ref
+    #   which is not scoped to all
+    #
+    # That is AWS refusing to let you create the over-broad policy that the
+    # ID conditions above were meant to avoid. The ID conditions are still
+    # worth keeping: they are immutable, so they hold even if this repo or
+    # the account is renamed and the names in `sub` change underneath us.
+    #
+    # The trailing :* covers every workflow context - pull_request,
+    # ref:refs/heads/main, environment:prod - which is what we need while a
+    # single role serves both the PR gate and deploys.
+    condition {
+      test     = "StringLike"
+      variable = "token.actions.githubusercontent.com:sub"
+      values   = ["${local.oidc_sub_prefix}:*"]
     }
 
     # NOTE: any workflow in this repo can assume the role, on any branch or
