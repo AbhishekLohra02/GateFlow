@@ -140,8 +140,62 @@ AWS-dependent work early and capture evidence into the repo, because the
 account (and everything in it) disappears at expiry. The REPO is the
 portfolio, not the AWS account.
 
-**Still to check:** exact credit balance and plan end date - Billing and
-Cost Management -> Free tier. That date is the real project deadline.
+**RESOLVED 2026-09-17 - THE DEADLINE IS 2026-09-27.** Checked in Billing
+and Cost Management -> Free tier:
+- **Free access ends Sep 27, 2026** (11 days remaining as of 2026-09-17).
+- **Credits remaining: $119.72** - essentially untouched.
+
+Consequence, and it changes the cost calculus: the Phase 1 design burns
+~$0/day because every component is free-tier covered, so that $119.72
+will expire **unspent and worthless** when the account closes. Credits are
+NOT a constraint. The only real constraints are (a) the Sep 27 wall and
+(b) not upgrading to a paid plan.
+
+The "NEVER create these" list above still governs the MAIN build - not
+because the money matters now, but because a lean VPC is the better
+engineering story and adding infra under a hard deadline is risk. But the
+expiring credits make a deliberate, TIME-BOXED spend rational at the end
+if days 2-8 land on schedule (rough daily burn: EKS $2.40, NAT $1.08,
+ALB ~$0.60 - all three for 10 days is ~$42 of a $119.72 balance):
+- the optional EKS proving run, and/or
+- one ALB run to capture what the no-ALB design trades away.
+Neither is committed. Both need explicit user sign-off first.
+
+**User's plan (stated 2026-09-17): compress day-sequence steps 2-8 into
+~3 days**, at 5+ hrs/day. Do not re-raise schedule concerns. If that
+lands, the AWS account still has ~7 days of life and ~$119 of expiring
+credits left over - which reopens **EKS as a real option inside the
+account's lifetime**, not just the optional post-hoc proving run. Raise
+that decision once steps 2-8 are done, not before.
+
+**Evidence capture is now urgent.** The account and everything in it is
+deleted after Sep 27. Every terraform plan/apply output, CI run, ECS
+console view and smoke-test result must land in the REPO (docs/evidence/
++ architecture.md) as it happens, not "later".
+
+## Terraform stack layout (decided 2026-09-17, user's call)
+
+Bootstrap is kept SEPARATE from anything CI runs. Not tidiness - a security
+boundary:
+- `terraform/bootstrap/` - **human-run from CloudShell, once.** Owns the S3
+  state bucket, the GitHub OIDC provider, and the `gateflow-github-actions`
+  IAM role. CI must never manage these: if the pipeline's Terraform owned
+  the role the pipeline assumes, anyone able to merge a PR could grant that
+  role more permissions (privilege escalation). Likewise a stack that can
+  delete the bucket holding its own state is one bad plan from
+  unrecoverable. Resolves its own chicken-and-egg by applying with local
+  state, then `terraform init -migrate-state` into the bucket it created.
+  Bucket carries `prevent_destroy = true`.
+- `terraform/shared/` - **CI-run.** Resources shared by all environments
+  (ECR). One repo, not one per env, so the exact image tested in dev is the
+  one promoted to prod.
+- `terraform/environments/{dev,staging,prod}/` - **CI-run**, one state key
+  each.
+
+**State locking uses S3 `use_lockfile = true` (Terraform >= 1.10), NOT
+DynamoDB.** This supersedes the DynamoDB references elsewhere in this file
+and in docs/architecture.md. DynamoDB-based locking is deprecated; S3 does
+it natively via conditional writes. No lock table is created.
 
 ## Phase 1 day sequence
 1. Verify the container (build/run/curl/whoami) + unit tests. <- HERE
@@ -180,8 +234,17 @@ https://github.com/AbhishekLohra02/GateFlow - repo is now **public**.
 - AWS work is done in the browser console.
 - This pulled the CI pipeline forward from day 7 to day 1.
 
-Outstanding:
-- `ci.yml` not yet pushed/verified - the Dockerfile is STILL unbuilt and
-  unverified. This is the immediate next milestone.
+**Day 1 COMPLETE (2026-09-17).** CI pipeline ran green on commit e1db726:
+image builds, container starts, both endpoints respond, `whoami` returns
+`appuser`, Trivy baseline captured. The Dockerfile is now verified.
+
+Outstanding before Terraform can run:
 - AWS Budget alert not yet created.
-- Credit balance / plan end date not yet checked.
+- ~~Credit balance / plan end date~~ DONE: ends **2026-09-27**, $119.72 left.
+- S3 state bucket + DynamoDB lock table not yet bootstrapped.
+- GitHub OIDC identity provider + IAM role not yet created in AWS.
+- Note: **AWS CloudShell is available on the Free Plan** - browser-based
+  shell with credentials pre-configured. Useful since the user installs
+  nothing locally.
+- From here on use a BRANCH + PR, not direct pushes to main, so the
+  `pull_request` gate in ci.yml actually gets exercised.

@@ -72,3 +72,87 @@ jobs:
       - name: Container logs
         if: always()
         run: docker logs gateflow
+
+  # ---------------------------------------------------------------------
+  # Terraform gate. Runs alongside the container build, not after it -
+  # they are independent, so running them in parallel halves feedback time.
+  # ---------------------------------------------------------------------
+  terraform:
+    runs-on: ubuntu-latest
+
+    # Least privilege, declared per job rather than per workflow.
+    #
+    # id-token: write is what lets this job request an OIDC token from
+    # GitHub to trade for temporary AWS credentials. Without it the
+    # configure-aws-credentials step fails with a confusing "Credentials
+    # could not be loaded" - the #1 OIDC setup error.
+    #
+    # contents: read is the minimum needed to check out the code. Note that
+    # naming ANY permission here drops every other permission to none,
+    # which is the point.
+    permissions:
+      id-token: write
+      contents: read
+
+    defaults:
+      run:
+        working-directory: terraform/shared
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # No long-lived AWS_ACCESS_KEY_ID anywhere. This exchanges a
+      # short-lived GitHub identity token for STS credentials that expire in
+      # about an hour and cannot be replayed. Leaked static keys in CI are
+      # the most common way cloud accounts get compromised, and they never
+      # expire on their own.
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: Confirm which AWS identity we assumed
+        run: aws sts get-caller-identity
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.10.5"
+
+      # Formatting is not cosmetic here - it is the cheapest possible check
+      # and it keeps diffs about behaviour instead of whitespace.
+      # -check fails rather than rewriting; -recursive covers subdirectories.
+      - name: Check formatting
+        run: terraform fmt -check -recursive
+        working-directory: terraform
+
+      # Connects to the S3 backend. This is also the step that proves the
+      # bucket, the backend config and the IAM permissions all line up.
+      - name: Init
+        run: terraform init
+
+      # Validate is offline: syntax, types, references. Catches a typo in
+      # seconds without ever calling AWS.
+      - name: Validate
+        run: terraform validate
+
+      # The actual gate. Plan talks to AWS, compares real infrastructure
+      # against the config, and reports the delta.
+      #
+      # -input=false: never wait for an interactive prompt. Without it a
+      # missing variable hangs the runner until it times out instead of
+      # failing fast.
+      # -no-color: the ANSI escapes are unreadable in Actions logs.
+      - name: Plan
+        id: plan
+        run: terraform plan -input=false -no-color -out=tfplan
+
+      # Put the plan in the run summary so it is readable without expanding
+      # log groups - and so a reviewer can see the intended change.
+      - name: Publish plan to the run summary
+        if: always()
+        run: |
+          echo '### Terraform plan' >> $GITHUB_STEP_SUMMARY
+          echo '```terraform' >> $GITHUB_STEP_SUMMARY
+          terraform show -no-color tfplan >> $GITHUB_STEP_SUMMARY || echo 'plan failed' >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY

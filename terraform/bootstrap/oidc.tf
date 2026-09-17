@@ -1,0 +1,94 @@
+# Tells AWS to trust GitHub as an identity provider.
+#
+# This is what makes keyless CI possible. GitHub signs a short-lived token
+# describing WHICH repo, branch and workflow is running; AWS verifies that
+# signature and exchanges it for temporary STS credentials.
+#
+# The alternative - an IAM user with an access key pasted into GitHub
+# secrets - means a credential that never expires, in a public repo's CI,
+# recoverable from any leaked log or compromised third-party action. It is
+# the most common root cause of cloud account compromise via CI.
+resource "aws_iam_openid_connect_provider" "github" {
+  url = "https://token.actions.githubusercontent.com"
+
+  # The audience. GitHub sets `aud` to this when configure-aws-credentials
+  # requests the token; AWS refuses the exchange if it does not match.
+  client_id_list = ["sts.amazonaws.com"]
+
+  # Since 2023 AWS validates GitHub's certificate against its own trusted
+  # root CAs and effectively ignores these, but the argument is still
+  # required by the API. Historically this had to be rotated by hand
+  # whenever GitHub's CA changed - a fun way to break every pipeline at once.
+  thumbprint_list = [
+    "6938fd4d98bab03faadb97b34396831e3780aea1",
+    "1c58a3a8518e8759bf075b76b750d4f2df264fcd",
+  ]
+}
+
+# The trust policy - WHO may assume the role. This is the security boundary
+# of the entire pipeline, so it is built as a data source where every
+# condition is explicit and reviewable in the diff.
+data "aws_iam_policy_document" "github_actions_assume_role" {
+  statement {
+    effect  = "Allow"
+    actions = ["sts:AssumeRoleWithWebIdentity"]
+
+    principals {
+      type        = "Federated"
+      identifiers = [aws_iam_openid_connect_provider.github.arn]
+    }
+
+    # Must be the audience we registered above.
+    condition {
+      test     = "StringEquals"
+      variable = "token.actions.githubusercontent.com:aud"
+      values   = ["sts.amazonaws.com"]
+    }
+
+    # THE line that matters.
+    #
+    # `sub` identifies the workload: "repo:owner/name:ref:refs/heads/main",
+    # "repo:owner/name:pull_request", and so on. Restricting it to this repo
+    # is what stops any other GitHub repository on the internet from
+    # assuming this role.
+    #
+    # The console's default trust policy leaves this unconstrained. Because
+    # this repo is public, the role ARN is visible to everyone - so an
+    # unconstrained `sub` is not a theoretical risk, it is an open door.
+    #
+    # Tightened later: pinning to `:ref:refs/heads/main` would block PRs
+    # from forks entirely. We need `plan` to run on pull requests, so the
+    # wildcard stays for now and permissions are scoped instead.
+    condition {
+      test     = "StringLike"
+      variable = "token.actions.githubusercontent.com:sub"
+      values   = ["repo:${var.github_repository}:*"]
+    }
+  }
+}
+
+resource "aws_iam_role" "github_actions" {
+  name               = "gateflow-github-actions"
+  description        = "Assumed by GitHub Actions via OIDC to run Terraform and push images."
+  assume_role_policy = data.aws_iam_policy_document.github_actions_assume_role.json
+
+  # Caps how long the credentials live regardless of what the workflow asks
+  # for. A long-running job is not a reason to hold admin credentials for
+  # 12 hours.
+  max_session_duration = 3600
+}
+
+# TEMPORARY, AND DELIBERATE.
+#
+# Scoping IAM before you know which API calls Terraform actually makes means
+# guessing, then losing hours to AccessDenied errors that name an action but
+# never the resource. The professional move is to start broad, capture the
+# real calls from CloudTrail once the infrastructure exists, and narrow to
+# that - which is a day 8 task tracked in CLAUDE.md.
+#
+# Saying this out loud in a review is the difference between "I started
+# broad and tightened from observed usage" and "I left it as admin".
+resource "aws_iam_role_policy_attachment" "github_actions_admin" {
+  role       = aws_iam_role.github_actions.name
+  policy_arn = "arn:aws:iam::aws:policy/AdministratorAccess"
+}
