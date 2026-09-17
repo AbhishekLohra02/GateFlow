@@ -1,0 +1,20 @@
+# Node
+node_modules/
+npm-debug.log
+
+# Terraform
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+crash.log
+crash.*.log
+
+# Env / secrets
+.env
+*.pem
+
+# OS
+.DS_Store
+Thumbs.db
