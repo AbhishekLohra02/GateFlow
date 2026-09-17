@@ -88,43 +88,100 @@ gateflow/
 See root `README.md` for the fuller reasoning on base/overlays and
 per-environment Terraform state.
 
-## Cost / timeline constraints
-- AWS free-tier account expires ~10 days from 2026-09-17.
-- EKS control plane is NOT free-tier covered (~$0.10/hr) - always flag
-  before creating one, and tear down the same session once it's served its
-  purpose. Don't leave paid AWS resources running unnecessarily.
+## Two-phase plan (decided 2026-09-17, user's own idea - agreed)
+User requires the project to stay in free tier. EKS is the ONLY component
+with no free tier at all, so the project splits:
+- **Phase 1** - Terraform + ECS on EC2, NO Kubernetes. Genuinely $0.
+- **Phase 2** - migrate the same app/pipeline to Kubernetes on `kind`
+  (free). Optional short EKS proving run later.
+Bonus: this yields a *migration* story ("built on ECS, migrated to k8s"),
+which interviews better than a greenfield k8s deploy.
+See `docs/architecture.md` for the full Phase 1 design and reasoning.
 
-## 10-day sequence (adjust dates as time passes)
-1-2. Docker (images, Dockerfile, multi-stage builds, compose, push to ECR)
-3-4. Kubernetes (concepts + local practice with kind, then real EKS)
-5-6. Terraform (HCL fundamentals, then the actual infra: VPC/ECR/EKS)
-7. CI/CD - GitHub Actions pipeline: PR checks -> dev -> staging -> prod
-8. Testing pipeline depth + monitoring + the AI PR-summary step
-9. Teardown AWS resources before free tier ends + polish repo/README/diagram
-10. Interview prep - walk through the project, common interview questions
+## Cost model (must stay ~$0)
+Free and confirmed via AWS pricing pages (researched 2026-09-17):
+- VPC/subnets/IGW/route tables/security groups/IAM: always free.
+- **ECS orchestration: no charge on EC2 launch type** - you pay only for
+  EC2/EBS/public IPv4 underneath.
+- EC2 t3.micro 750 hrs/mo; ECR 500MB; CloudWatch Logs 5GB.
+- S3 + DynamoDB for Terraform remote state + locking: free tier.
+- Codespaces (spending limit $0 by default - cannot overbill), GitHub
+  Actions (unlimited on public repos), ghcr.io, GitHub Models.
+
+NEVER create these - each is the difference between $0 and ~$50/mo:
+- **NAT Gateway** (~$33/mo). Most community VPC modules add one BY
+  DEFAULT. Use public subnets instead. #1 surprise-bill cause.
+- **ALB/Ingress** (~$16/mo). Note a k8s `Service: LoadBalancer` creates
+  one implicitly - Terraform won't show it but AWS bills it.
+- **EKS** ($0.10/hr, no free tier). Deferred to Phase 2, optional.
+- **Fargate** (no free tier at all).
+Also: since Feb 2024 every public IPv4 costs $0.005/hr (~$3.60/mo) once
+free tier lapses.
+
+**RESOLVED 2026-09-17:** user created the AWS account a few months ago,
+so it is on the **new Free Plan** (post 2025-07-15), NOT the legacy
+12-month tier. Confirmed from AWS docs:
+- $100 credits on signup, up to $100 more from onboarding activities.
+- Plan ends after **6 months OR when credits run out**, whichever first.
+- **"You will not incur any charges during this period until you upgrade
+  to a paid account plan."** So on the Free Plan the user CANNOT be
+  billed money. The real constraint is credit burn + account lifetime.
+- At expiry AWS **closes the account**; 90 days to upgrade and recover
+  data before permanent deletion.
+- Everything this project needs IS available on the Free Plan, including
+  EC2, ECS, **EKS**, ECR, S3, DynamoDB, VPC, IAM, CloudWatch, ELB,
+  CodeDeploy, CodeBuild, Systems Manager, STS, Budgets.
+- Restricted: Marketplace (Bedrock/Free only), Reserved Instances,
+  Savings Plans, hardware. None of which we need.
+
+**Consequence - the constraint is TIME, not money.** Credits expire
+worthless when the account closes, so hoarding them is pointless. Do the
+AWS-dependent work early and capture evidence into the repo, because the
+account (and everything in it) disappears at expiry. The REPO is the
+portfolio, not the AWS account.
+
+**Still to check:** exact credit balance and plan end date - Billing and
+Cost Management -> Free tier. That date is the real project deadline.
+
+## Phase 1 day sequence
+1. Verify the container (build/run/curl/whoami) + unit tests. <- HERE
+2. Terraform fundamentals; remote state backend (S3+DynamoDB) + ECR repo.
+3. Network module: VPC, public subnet, IGW, security group.
+4. ECS module: cluster, EC2 capacity, task definition, service. Dev up.
+5. Replicate to staging/prod as separate stacks with separate state.
+6. GitHub Actions: OIDC to AWS, PR checks workflow.
+7. Deploy pipeline: dev -> staging -> manual approval -> prod.
+8. Smoke tests, auto-rollback, AI PR-summary step (GitHub Models).
+9. Teardown, README, diagram.
+10. Interview prep.
 
 ## Dev environment (decided 2026-09-17)
-All hands-on work happens in a **GitHub Codespace**, not on the user's
-laptop - they explicitly did not want Docker Desktop or anything else
-installed locally. Machine is Windows 11 **Home** (no Hyper-V, so Docker
-Desktop would have required a WSL2 install; rejected as too much local
-footprint for a 10-day project).
-- `.devcontainer/devcontainer.json` defines the environment: Python 3.12
-  base (matches `app/Dockerfile`), `docker-in-docker` feature for a real
-  Docker daemon, `aws-cli` feature for the Day 2 ECR push. kubectl and
-  terraform features get added on their own days.
-- User connects **VS Code Desktop -> remote Codespace**, so Claude runs
-  inside the Codespace and can read/write files and run docker there.
-- Codespaces free tier bills on wall-clock runtime: stop the Codespace
-  when done. Same discipline as tearing down EKS.
+All hands-on work happens in a **GitHub Codespace**, not the user's laptop
+- they explicitly did not want Docker Desktop or anything installed
+locally. Windows 11 **Home** (no Hyper-V; Docker Desktop would have needed
+a WSL2 install - rejected).
+- `.devcontainer/devcontainer.json`: Python 3.12 base (matches
+  `app/Dockerfile`), `docker-in-docker`, `aws-cli`. Terraform feature gets
+  added on day 2.
+- User connects **VS Code Desktop -> remote Codespace**.
+- Stop the Codespace when done; core-hours burn on wall-clock runtime.
 
 ## Status as of 2026-09-17
-Day 1. Repo scaffolded, Flask app + Dockerfile written, `.devcontainer/`
-added. Three local commits, **not yet pushed to GitHub** - user must
-create an empty GitHub repo and push from their own terminal so their
-auth stays local. That push is now a hard blocker: Codespaces requires
-the remote repo to exist.
-Nothing has been `docker build`-ed yet - the Dockerfile is written but
-completely unverified. First task once the Codespace is up:
-`docker build` / `docker run` / `curl`, plus `docker exec -it <id> whoami`
-to prove the non-root `appuser` actually took effect.
+Day 1. Repo scaffolded, Flask app + Dockerfile + `.devcontainer/` +
+`docs/architecture.md` + `.github/workflows/ci.yml` written and pushed to
+https://github.com/AbhishekLohra02/GateFlow - repo is now **public**.
+
+**User declined to create a Codespace** and will not install Docker. So:
+- Claude writes every file locally; the user commits and pushes.
+- **GitHub Actions is the execution environment.** CI builds the image,
+  runs the container, curls both endpoints, asserts `whoami` == appuser,
+  and runs Trivy. Later it will run terraform plan/apply too.
+- No interactive debugging is possible. Feedback loop is a git push.
+- AWS work is done in the browser console.
+- This pulled the CI pipeline forward from day 7 to day 1.
+
+Outstanding:
+- `ci.yml` not yet pushed/verified - the Dockerfile is STILL unbuilt and
+  unverified. This is the immediate next milestone.
+- AWS Budget alert not yet created.
+- Credit balance / plan end date not yet checked.

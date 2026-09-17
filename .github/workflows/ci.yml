@@ -1,0 +1,74 @@
+# Runs on every PR and every push to main.
+# This is the "PR gate" - nothing merges unless this passes.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  build-and-verify:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Tagged with the commit SHA, never ':latest'. An immutable tag means
+      # you can always answer "which commit is this image?" and a rollback
+      # has a real target to roll back TO.
+      - name: Build image
+        run: docker build -t gateflow-app:${{ github.sha }} ./app
+
+      - name: Start container
+        run: docker run -d -p 3000:3000 --name gateflow gateflow-app:${{ github.sha }}
+
+      # Poll rather than `sleep 10`. A fixed sleep is either too short
+      # (flaky failures) or too slow (wasted minutes on every run).
+      - name: Wait for the app to become healthy
+        run: |
+          for i in $(seq 1 15); do
+            if curl -fsS http://localhost:3000/health; then
+              echo "healthy after ${i} attempt(s)"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::app never became healthy"
+          docker logs gateflow
+          exit 1
+
+      - name: Check the root endpoint
+        run: curl -fsS http://localhost:3000
+
+      # The claim "runs as non-root" is worthless unless it is verified.
+      # If the USER directive ever gets dropped, this fails the build.
+      - name: Verify the container does NOT run as root
+        run: |
+          actual=$(docker exec gateflow whoami)
+          echo "container user: ${actual}"
+          if [ "${actual}" != "appuser" ]; then
+            echo "::error::expected 'appuser', got '${actual}'"
+            exit 1
+          fi
+
+      - name: Report image size
+        run: docker images gateflow-app
+
+      # Trivy is just a container itself. Report-only for now (--exit-code 0)
+      # so we can see the baseline; we tighten this to fail the build once
+      # we've dealt with whatever the base image ships with.
+      - name: Scan image for known vulnerabilities
+        run: |
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            aquasec/trivy:latest image \
+              --severity HIGH,CRITICAL \
+              --exit-code 0 \
+              gateflow-app:${{ github.sha }}
+
+      # `if: always()` - run even when an earlier step failed. Without this,
+      # a failure gives you no logs from the thing that failed.
+      - name: Container logs
+        if: always()
+        run: docker logs gateflow
