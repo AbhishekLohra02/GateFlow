@@ -45,28 +45,44 @@ data "aws_iam_policy_document" "github_actions_assume_role" {
       values   = ["sts.amazonaws.com"]
     }
 
-    # THE line that matters.
+    # THE conditions that matter - the security boundary of the pipeline.
     #
-    # `sub` identifies the workload: "repo:owner/name:ref:refs/heads/main",
-    # "repo:owner/name:pull_request", and so on. Restricting it to this repo
-    # is what stops any other GitHub repository on the internet from
-    # assuming this role.
+    # These pin the role to THIS repository, and nothing else on GitHub.
     #
-    # The console's default trust policy leaves this unconstrained. Because
-    # this repo is public, the role ARN is visible to everyone - so an
-    # unconstrained `sub` is not a theoretical risk, it is an open door.
+    # We do it on the numeric IDs rather than on `sub` string-matching,
+    # because GitHub now issues IMMUTABLE subject claims. The sub for this
+    # repo reads:
     #
-    # Tightened later: pinning to `:ref:refs/heads/main` would block PRs
-    # from forks entirely. We need `plan` to run on pull requests, so the
-    # wildcard stays for now and permissions are scoped instead.
+    #   repo:AbhishekLohra02@217813897/GateFlow@1374185994:pull_request
+    #
+    # not the `repo:owner/name:ref` form every tutorial shows. A trust
+    # policy written the old way silently never matches, and AWS returns a
+    # bare "Not authorized to perform sts:AssumeRoleWithWebIdentity" that
+    # names neither the claim nor the condition that failed.
+    #
+    # Matching IDs is also strictly safer than matching names. Rename this
+    # repo or the account and someone else can register the old name - their
+    # tokens would then satisfy a name-based policy. Numeric IDs cannot be
+    # re-registered, so this survives a rename in both directions.
     condition {
-      test     = "StringLike"
-      variable = "token.actions.githubusercontent.com:sub"
-      values   = ["repo:${var.github_repository}:*"]
+      test     = "StringEquals"
+      variable = "token.actions.githubusercontent.com:repository_owner_id"
+      values   = [var.github_repository_owner_id]
     }
-  }
-}
 
+    condition {
+      test     = "StringEquals"
+      variable = "token.actions.githubusercontent.com:repository_id"
+      values   = [var.github_repository_id]
+    }
+
+    # NOTE: any workflow in this repo can assume the role, on any branch or
+    # PR. That is intentional for now - `terraform plan` must run on pull
+    # requests, so pinning to refs/heads/main would break the PR gate.
+    #
+    # Day 7 tightens this: the prod deploy gets its OWN role, conditioned on
+    # the `environment` claim, so a PR can plan but only an approved
+    # deployment can touch production.
 resource "aws_iam_role" "github_actions" {
   name               = "gateflow-github-actions"
   description        = "Assumed by GitHub Actions via OIDC to run Terraform and push images."
