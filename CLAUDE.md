@@ -103,11 +103,28 @@ per-environment Terraform state.
 9. Teardown AWS resources before free tier ends + polish repo/README/diagram
 10. Interview prep - walk through the project, common interview questions
 
+## Dev environment (decided 2026-09-17)
+All hands-on work happens in a **GitHub Codespace**, not on the user's
+laptop - they explicitly did not want Docker Desktop or anything else
+installed locally. Machine is Windows 11 **Home** (no Hyper-V, so Docker
+Desktop would have required a WSL2 install; rejected as too much local
+footprint for a 10-day project).
+- `.devcontainer/devcontainer.json` defines the environment: Python 3.12
+  base (matches `app/Dockerfile`), `docker-in-docker` feature for a real
+  Docker daemon, `aws-cli` feature for the Day 2 ECR push. kubectl and
+  terraform features get added on their own days.
+- User connects **VS Code Desktop -> remote Codespace**, so Claude runs
+  inside the Codespace and can read/write files and run docker there.
+- Codespaces free tier bills on wall-clock runtime: stop the Codespace
+  when done. Same discipline as tearing down EKS.
+
 ## Status as of 2026-09-17
-Day 1 in progress. Repo scaffolded, Flask app + Dockerfile written,
-git initialized with one local commit (NOT yet pushed to GitHub - user
-needs to create an empty GitHub repo and push from their own terminal so
-their auth stays local, not through any bridge). User was mid-install of
-Docker Desktop (was missing entirely) - next step once installed is
-`docker build`/`docker run`/`curl` against `app/`, including checking the
-non-root user with `docker exec -it <id> whoami`. Not yet done.
+Day 1. Repo scaffolded, Flask app + Dockerfile written, `.devcontainer/`
+added. Three local commits, **not yet pushed to GitHub** - user must
+create an empty GitHub repo and push from their own terminal so their
+auth stays local. That push is now a hard blocker: Codespaces requires
+the remote repo to exist.
+Nothing has been `docker build`-ed yet - the Dockerfile is written but
+completely unverified. First task once the Codespace is up:
+`docker build` / `docker run` / `curl`, plus `docker exec -it <id> whoami`
+to prove the non-root `appuser` actually took effect.

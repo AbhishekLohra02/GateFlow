@@ -1,0 +1,48 @@
+// Defines the development environment itself, as code.
+// GitHub Codespaces reads this file to build the container you work inside,
+// so every machine (and every teammate) gets an identical toolchain.
+// Note: this is JSONC - comments are legal here, unlike in strict JSON.
+{
+  "name": "GateFlow",
+
+  // Matches app/Dockerfile's base (python:3.12-slim). Keeping the dev
+  // environment on the same Python minor version as the shipped image is
+  // what stops "works in dev, breaks in the container" bugs.
+  "image": "mcr.microsoft.com/devcontainers/python:1-3.12-bookworm",
+
+  "features": {
+    // Runs a real Docker daemon INSIDE this container, so `docker build`
+    // works here exactly as it would on a laptop.
+    "ghcr.io/devcontainers/features/docker-in-docker:2": {},
+
+    // Needed on Day 2 to push images to ECR.
+    "ghcr.io/devcontainers/features/aws-cli:1": {}
+
+    // Added on their own days (each addition = one container rebuild):
+    //   ghcr.io/devcontainers/features/kubectl-helm-minikube:1  (Days 3-4)
+    //   ghcr.io/devcontainers/features/terraform:1              (Days 5-6)
+  },
+
+  // The app binds to 3000 (see app/Dockerfile). Declaring it here means
+  // VS Code forwards it to your laptop automatically, so you can curl it
+  // or open it in a browser as if it were running locally.
+  "forwardPorts": [3000],
+  "portsAttributes": {
+    "3000": { "label": "GateFlow app" }
+  },
+
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-azuretools.vscode-docker",
+        "ms-python.python",
+        "anthropic.claude-code"
+      ]
+    }
+  },
+
+  // Never develop as root. Mirrors the non-root `appuser` in app/Dockerfile:
+  // the habit is the point, and it catches file-permission bugs early
+  // rather than in production.
+  "remoteUser": "vscode"
+}
