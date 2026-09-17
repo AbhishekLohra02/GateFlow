@@ -101,30 +101,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # TEMPORARY - remove once OIDC is confirmed working.
-      # Prints the claims AWS is matching the trust policy against, and the
-      # LENGTH of the role secret (GitHub masks the value itself). This is
-      # the only way to see why an assume-role was refused: AWS deliberately
-      # returns the same "Not authorized" for a wrong ARN, a missing role and
-      # a failed condition, so it never tells you which one it was.
-      - name: DEBUG - OIDC claims and secret shape
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const token = await core.getIDToken('sts.amazonaws.com')
-            const claims = JSON.parse(Buffer.from(token.split('.')[1], 'base64').toString())
-            core.info(`sub        = ${claims.sub}`)
-            core.info(`aud        = ${claims.aud}`)
-            core.info(`repository = ${claims.repository}`)
-            core.info(`issuer     = ${claims.iss}`)
-
-      - name: DEBUG - is the secret present
-        env:
-          ROLE: ${{ secrets.AWS_ROLE_ARN }}
-        run: |
-          echo "AWS_ROLE_ARN length: ${#ROLE}  (expected 54)"
-          echo "starts with arn:aws:iam:: ? $(case "$ROLE" in arn:aws:iam::*) echo yes;; *) echo NO;; esac)"
-
       # No long-lived AWS_ACCESS_KEY_ID anywhere. This exchanges a
       # short-lived GitHub identity token for STS credentials that expire in
       # about an hour and cannot be replayed. Leaked static keys in CI are
@@ -180,3 +156,64 @@ jobs:
           echo '```terraform' >> $GITHUB_STEP_SUMMARY
           terraform show -no-color tfplan >> $GITHUB_STEP_SUMMARY || echo 'plan failed' >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
+
+  # ---------------------------------------------------------------------
+  # Apply. Runs ONLY on main, only after both gates pass.
+  #
+  # A pull request never applies - it only plans. That separation is what
+  # makes the PR gate meaningful: anyone can propose infrastructure, nobody
+  # changes it without a merge.
+  # ---------------------------------------------------------------------
+  terraform-apply:
+    # `push` alone is not enough - pushes to any branch trigger this
+    # workflow. Both conditions are required.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    # Do not apply infrastructure for a commit whose image does not build
+    # or whose plan failed. `needs` makes this job wait for both.
+    needs: [build-and-verify, terraform]
+
+    runs-on: ubuntu-latest
+
+    permissions:
+      id-token: write
+      contents: read
+
+    # Two merges in quick succession would otherwise run two applies at
+    # once. The S3 state lock would make the second fail partway through;
+    # this queues it instead. cancel-in-progress stays FALSE - killing an
+    # apply mid-flight leaves resources created but unrecorded in state,
+    # which is the worst outcome available.
+    concurrency:
+      group: terraform-apply-shared
+      cancel-in-progress: false
+
+    defaults:
+      run:
+        working-directory: terraform/shared
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.16.3"
+
+      - name: Init
+        run: terraform init
+
+      # -auto-approve because there is no human at a terminal. The review
+      # happened on the PR, where the plan was posted to the run summary.
+      # -input=false so a missing variable fails immediately instead of
+      # hanging the runner on a prompt nobody can answer.
+      - name: Apply
+        run: terraform apply -auto-approve -input=false
+
+      - name: Show outputs
+        run: terraform output
