@@ -24,7 +24,7 @@ into `~/bin`, which persists.
 
 ```bash
 mkdir -p ~/bin && cd ~/bin
-curl -sLo tf.zip https://releases.hashicorp.com/terraform/1.10.5/terraform_1.10.5_linux_amd64.zip
+curl -sLo tf.zip https://releases.hashicorp.com/terraform/1.16.3/terraform_1.16.3_linux_amd64.zip
 unzip -o tf.zip && rm tf.zip
 echo 'export PATH=$HOME/bin:$PATH' >> ~/.bashrc && export PATH=$HOME/bin:$PATH
 terraform version
