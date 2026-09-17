@@ -101,6 +101,30 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # TEMPORARY - remove once OIDC is confirmed working.
+      # Prints the claims AWS is matching the trust policy against, and the
+      # LENGTH of the role secret (GitHub masks the value itself). This is
+      # the only way to see why an assume-role was refused: AWS deliberately
+      # returns the same "Not authorized" for a wrong ARN, a missing role and
+      # a failed condition, so it never tells you which one it was.
+      - name: DEBUG - OIDC claims and secret shape
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const token = await core.getIDToken('sts.amazonaws.com')
+            const claims = JSON.parse(Buffer.from(token.split('.')[1], 'base64').toString())
+            core.info(`sub        = ${claims.sub}`)
+            core.info(`aud        = ${claims.aud}`)
+            core.info(`repository = ${claims.repository}`)
+            core.info(`issuer     = ${claims.iss}`)
+
+      - name: DEBUG - is the secret present
+        env:
+          ROLE: ${{ secrets.AWS_ROLE_ARN }}
+        run: |
+          echo "AWS_ROLE_ARN length: ${#ROLE}  (expected 54)"
+          echo "starts with arn:aws:iam:: ? $(case "$ROLE" in arn:aws:iam::*) echo yes;; *) echo NO;; esac)"
+
       # No long-lived AWS_ACCESS_KEY_ID anywhere. This exchanges a
       # short-lived GitHub identity token for STS credentials that expire in
       # about an hour and cannot be replayed. Leaked static keys in CI are
