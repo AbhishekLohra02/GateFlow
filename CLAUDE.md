@@ -197,9 +197,37 @@ DynamoDB.** This supersedes the DynamoDB references elsewhere in this file
 and in docs/architecture.md. DynamoDB-based locking is deprecated; S3 does
 it natively via conditional writes. No lock table is created.
 
+**Day 2 progress (2026-09-17).** Bootstrap applied from CloudShell:
+S3 state bucket `gateflow-tfstate-355421126727` (versioned, encrypted,
+public access blocked, `prevent_destroy`), GitHub OIDC provider, and the
+`gateflow-github-actions` role. Bootstrap state migrated into that bucket.
+CI now authenticates to AWS keylessly and plans the shared stack green.
+Account ID `355421126727`.
+
+**Two OIDC gotchas that cost real time - do not re-learn these:**
+1. GitHub issues **immutable subject claims**:
+   `repo:AbhishekLohra02@217813897/GateFlow@1374185994:pull_request`, NOT
+   the `repo:owner/name:ref` form every tutorial shows. A name-based `sub`
+   pattern silently never matches, and AWS returns only "Not authorized to
+   perform sts:AssumeRoleWithWebIdentity" - naming neither the claim nor
+   the condition that failed.
+2. AWS **rejects** a GitHub OIDC trust policy that does not constrain `sub`
+   or `job_workflow_ref` (`MalformedPolicyDocument ... not scoped to all`).
+   Conditioning only on `repository_id`/`repository_owner_id` is not
+   allowed - though those are worth keeping alongside it, since they
+   survive a repo or account rename.
+
+Useful IDs: owner_id `217813897`, repo_id `1374185994`.
+
+**CloudShell notes:** `$HOME` is **per-region** - open it anywhere but
+us-east-1 and the repo and terraform binary appear to have vanished. Its
+1GB quota is too small for the AWS provider (~700MB), hence
+`TF_DATA_DIR=/tmp/tfdata`, which means re-running `terraform init` each
+session since /tmp is wiped.
+
 ## Phase 1 day sequence
-1. Verify the container (build/run/curl/whoami) + unit tests. <- HERE
-2. Terraform fundamentals; remote state backend (S3+DynamoDB) + ECR repo.
+1. Verify the container (build/run/curl/whoami) + unit tests. DONE
+2. Terraform fundamentals; remote state backend (S3) + ECR repo. <- HERE
 3. Network module: VPC, public subnet, IGW, security group.
 4. ECS module: cluster, EC2 capacity, task definition, service. Dev up.
 5. Replicate to staging/prod as separate stacks with separate state.
