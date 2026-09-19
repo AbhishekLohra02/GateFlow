@@ -130,9 +130,32 @@ jobs:
   # ---------------------------------------------------------------------
   # Terraform gate. Runs alongside the container build, not after it -
   # they are independent, so running them in parallel halves feedback time.
+  #
+  # A MATRIX, because there is now more than one stack. Each entry gets its
+  # own runner, so both stacks plan in parallel and each reports its own
+  # pass/fail in the PR checks rather than one combined result.
   # ---------------------------------------------------------------------
   terraform:
+    name: terraform (${{ matrix.name }})
     runs-on: ubuntu-latest
+
+    strategy:
+      # Do NOT abort the other stack when one fails. The default (true)
+      # cancels siblings on first failure, so a broken dev plan would hide
+      # whether shared was fine - exactly the information you need.
+      fail-fast: false
+
+      matrix:
+        include:
+          - name: shared
+            stack: terraform/shared
+            # shared does not DECLARE image_tag. Passing a variable a stack
+            # has not declared is a hard error, not a warning, so per-stack
+            # vars live here rather than as one blanket flag.
+            tf_vars: ""
+          - name: dev
+            stack: terraform/environments/dev
+            tf_vars: -var=image_tag=${{ github.sha }}
 
     # Least privilege, declared per job rather than per workflow.
     #
@@ -141,90 +164,68 @@ jobs:
     # configure-aws-credentials step fails with a confusing "Credentials
     # could not be loaded" - the #1 OIDC setup error.
     #
-    # contents: read is the minimum needed to check out the code. Note that
-    # naming ANY permission here drops every other permission to none,
-    # which is the point.
+    # Naming ANY permission here drops every other permission to none.
     permissions:
       id-token: write
       contents: read
 
     defaults:
       run:
-        working-directory: terraform/shared
+        working-directory: ${{ matrix.stack }}
 
     steps:
       - uses: actions/checkout@v4
 
       # No long-lived AWS_ACCESS_KEY_ID anywhere. This exchanges a
       # short-lived GitHub identity token for STS credentials that expire in
-      # about an hour and cannot be replayed. Leaked static keys in CI are
-      # the most common way cloud accounts get compromised, and they never
-      # expire on their own.
+      # about an hour and cannot be replayed.
       - name: Configure AWS credentials via OIDC
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-          aws-region: us-east-1
-
-      - name: Confirm which AWS identity we assumed
-        run: aws sts get-caller-identity
+          aws-region: ${{ env.AWS_REGION }}
 
       - uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: "1.16.3"
 
-      # Formatting is not cosmetic here - it is the cheapest possible check
-      # and it keeps diffs about behaviour instead of whitespace.
-      # -check fails rather than rewriting; -recursive covers subdirectories.
+      # Cheapest possible check, and it keeps diffs about behaviour instead
+      # of whitespace. Runs against the whole tree so it covers the modules
+      # too, not just this stack.
       - name: Check formatting
         run: terraform fmt -check -recursive
         working-directory: terraform
 
-      # Connects to the S3 backend. This is also the step that proves the
-      # bucket, the backend config and the IAM permissions all line up.
       - name: Init
         run: terraform init
 
-      # Validate is offline: syntax, types, references. Catches a typo in
-      # seconds without ever calling AWS.
+      # Offline: syntax, types, references. Catches a typo in seconds
+      # without ever calling AWS.
       - name: Validate
         run: terraform validate
 
       # The actual gate. Plan talks to AWS, compares real infrastructure
       # against the config, and reports the delta.
-      #
-      # -input=false: never wait for an interactive prompt. Without it a
-      # missing variable hangs the runner until it times out instead of
-      # failing fast.
-      # -no-color: the ANSI escapes are unreadable in Actions logs.
       - name: Plan
-        id: plan
-        run: terraform plan -input=false -no-color -out=tfplan
+        run: terraform plan -input=false -no-color -out=tfplan ${{ matrix.tf_vars }}
 
-      # Put the plan in the run summary so it is readable without expanding
-      # log groups - and so a reviewer can see the intended change.
       - name: Publish plan to the run summary
         if: always()
         run: |
-          echo '### Terraform plan' >> $GITHUB_STEP_SUMMARY
+          echo '### Terraform plan - ${{ matrix.name }}' >> $GITHUB_STEP_SUMMARY
           echo '```terraform' >> $GITHUB_STEP_SUMMARY
           terraform show -no-color tfplan >> $GITHUB_STEP_SUMMARY || echo 'plan failed' >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
 
   # ---------------------------------------------------------------------
-  # Apply. Runs ONLY on main, only after both gates pass.
+  # Apply the SHARED stack. main only.
   #
-  # A pull request never applies - it only plans. That separation is what
-  # makes the PR gate meaningful: anyone can propose infrastructure, nobody
-  # changes it without a merge.
+  # Deliberately NOT in a matrix with dev: the dev stack READS shared's
+  # state to get the ECR URL, so shared must finish first. Matrix entries
+  # run in parallel and would race.
   # ---------------------------------------------------------------------
   terraform-apply:
-    # `push` alone is not enough - pushes to any branch trigger this
-    # workflow. Both conditions are required.
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-
-    # Do not apply infrastructure for a commit whose image does not build
-    # or whose plan failed. `needs` makes this job wait for both.
     needs: [build-and-verify, terraform]
 
     runs-on: ubuntu-latest
@@ -233,11 +234,10 @@ jobs:
       id-token: write
       contents: read
 
-    # Two merges in quick succession would otherwise run two applies at
-    # once. The S3 state lock would make the second fail partway through;
-    # this queues it instead. cancel-in-progress stays FALSE - killing an
-    # apply mid-flight leaves resources created but unrecorded in state,
-    # which is the worst outcome available.
+    # Two merges in quick succession would otherwise apply at once. The S3
+    # lock would make the second fail partway through; this queues it.
+    # cancel-in-progress stays FALSE - killing an apply mid-flight leaves
+    # resources created but unrecorded in state, the worst outcome there is.
     concurrency:
       group: terraform-apply-shared
       cancel-in-progress: false
@@ -253,7 +253,7 @@ jobs:
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-          aws-region: us-east-1
+          aws-region: ${{ env.AWS_REGION }}
 
       - uses: hashicorp/setup-terraform@v3
         with:
@@ -264,10 +264,93 @@ jobs:
 
       # -auto-approve because there is no human at a terminal. The review
       # happened on the PR, where the plan was posted to the run summary.
-      # -input=false so a missing variable fails immediately instead of
-      # hanging the runner on a prompt nobody can answer.
       - name: Apply
         run: terraform apply -auto-approve -input=false
 
       - name: Show outputs
         run: terraform output
+
+  # ---------------------------------------------------------------------
+  # Deploy to DEV. main only, after shared has applied.
+  #
+  # This is the job that actually puts the app on AWS: VPC, EC2 capacity and
+  # the ECS service, with the task definition pointing at the image this
+  # very commit built and pushed.
+  # ---------------------------------------------------------------------
+  deploy-dev:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    # terraform-apply already required build-and-verify, so the ECR push has
+    # happened by the time this runs. Without that ordering the task
+    # definition would name an image tag that does not exist yet and the
+    # task would sit in PENDING forever.
+    needs: [terraform-apply]
+
+    runs-on: ubuntu-latest
+
+    # Names a GitHub Environment. Today it only labels the deployment in the
+    # UI - but this is the hook that will later carry the required-reviewer
+    # approval gate on prod.
+    environment: dev
+
+    permissions:
+      id-token: write
+      contents: read
+
+    concurrency:
+      group: terraform-apply-dev
+      cancel-in-progress: false
+
+    defaults:
+      run:
+        working-directory: terraform/environments/dev
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.16.3"
+
+      - name: Init
+        run: terraform init
+
+      # The image tag IS the deployment. Same SHA the build job pushed.
+      - name: Apply
+        run: terraform apply -auto-approve -input=false -var="image_tag=${{ github.sha }}"
+
+      - name: Show outputs
+        run: terraform output
+
+      # ECS is ASYNCHRONOUS: apply returns as soon as the service is
+      # updated, not when the new task is actually running. Without this the
+      # job would go green while the container is still pulling - or crash
+      # looping. This blocks until the service reaches steady state, which
+      # turns "deployed" into something the pipeline has actually verified.
+      - name: Wait for the ECS service to stabilise
+        run: |
+          aws ecs wait services-stable \
+            --cluster "$(terraform output -raw cluster_name)" \
+            --services "$(terraform output -raw service_name)" \
+            --region "${AWS_REGION}"
+          echo "service reached steady state"
+
+      # Print the address to curl straight into the run summary, since there
+      # is no load balancer and the IP changes whenever the ASG replaces the
+      # instance.
+      - name: Report the public address
+        run: |
+          ip=$(aws ec2 describe-instances \
+            --filters 'Name=tag:Name,Values=gateflow-dev-ecs-instance' \
+                      'Name=instance-state-name,Values=running' \
+            --query 'Reservations[].Instances[].PublicIpAddress' \
+            --output text --region "${AWS_REGION}")
+          echo "### Dev deployed" >> $GITHUB_STEP_SUMMARY
+          echo "- http://${ip}:3000" >> $GITHUB_STEP_SUMMARY
+          echo "- http://${ip}:3000/health" >> $GITHUB_STEP_SUMMARY
