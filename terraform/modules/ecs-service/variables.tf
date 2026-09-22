@@ -71,3 +71,26 @@ variable "instance_count" {
   type        = number
   default     = 1
 }
+
+variable "deployment_min_healthy_percent" {
+  description = "Minimum percent of desired_count that must stay RUNNING during a deployment."
+  type        = number
+
+  # 0 is correct for a SINGLE instance holding a static host port: the old
+  # task must stop before the new one can bind the same port, so a brief
+  # outage is unavoidable. With two or more instances, 50 keeps half the
+  # capacity serving while the other half is replaced - a real rolling
+  # deployment with no downtime.
+  default = 0
+}
+
+variable "deployment_max_percent" {
+  description = "Maximum percent of desired_count that may be RUNNING during a deployment."
+  type        = number
+
+  # 100 means no surge capacity: ECS may not start extra tasks beyond
+  # desired_count. Raising it to 200 would start replacements BEFORE
+  # stopping the old ones - faster and safer, but it needs spare capacity
+  # to place them on, which a fixed-size cluster does not have.
+  default = 100
+}

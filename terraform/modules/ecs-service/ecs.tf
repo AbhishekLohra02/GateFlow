@@ -127,8 +127,8 @@ resource "aws_ecs_service" "app" {
   # balancer with dynamic host ports, which buys zero-downtime deploys for
   # about $16/month. That trade is deliberate and documented in
   # docs/architecture.md.
-  deployment_minimum_healthy_percent = 0
-  deployment_maximum_percent         = 100
+  deployment_minimum_healthy_percent = var.deployment_min_healthy_percent
+  deployment_maximum_percent         = var.deployment_max_percent
 
   # Roll back automatically if the new deployment never reaches a steady
   # state. Without it a bad image leaves the service stuck retrying forever

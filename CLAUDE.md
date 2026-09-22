@@ -234,9 +234,9 @@ session since /tmp is wiped.
 ## Phase 1 day sequence
 1. Verify the container (build/run/curl/whoami) + unit tests. DONE
 2. Terraform fundamentals; remote state backend (S3) + ECR repo. DONE
-3. Network module: VPC, public subnet, IGW, security group. <- HERE
-4. ECS module: cluster, EC2 capacity, task definition, service. Dev up.
-5. Replicate to staging/prod as separate stacks with separate state.
+3. Network module: VPC, public subnet, IGW, security group. DONE
+4. ECS module: cluster, EC2 capacity, task definition, service. DONE
+5. Replicate to staging/prod as separate stacks with separate state. <- HERE
 6. GitHub Actions: OIDC to AWS, PR checks workflow.
 7. Deploy pipeline: dev -> staging -> manual approval -> prod.
 8. Smoke tests, auto-rollback, AI PR-summary step (GitHub Models).
@@ -254,31 +254,50 @@ a WSL2 install - rejected).
 - User connects **VS Code Desktop -> remote Codespace**.
 - Stop the Codespace when done; core-hours burn on wall-clock runtime.
 
-## Status as of 2026-09-17
-Day 1. Repo scaffolded, Flask app + Dockerfile + `.devcontainer/` +
-`docs/architecture.md` + `.github/workflows/ci.yml` written and pushed to
-https://github.com/AbhishekLohra02/GateFlow - repo is now **public**.
+## Status as of 2026-09-19
 
-**User declined to create a Codespace** and will not install Docker. So:
-- Claude writes every file locally; the user commits and pushes.
-- **GitHub Actions is the execution environment.** CI builds the image,
-  runs the container, curls both endpoints, asserts `whoami` == appuser,
-  and runs Trivy. Later it will run terraform plan/apply too.
-- No interactive debugging is possible. Feedback loop is a git push.
-- AWS work is done in the browser console.
-- This pulled the CI pipeline forward from day 7 to day 1.
+**Days 3-4 COMPLETE. The app is DEPLOYED AND SERVING on AWS.**
 
-**Day 1 COMPLETE (2026-09-17).** CI pipeline ran green on commit e1db726:
-image builds, container starts, both endpoints respond, `whoami` returns
-`appuser`, Trivy baseline captured. The Dockerfile is now verified.
+Live in us-east-1: VPC `gateflow-dev-vpc`, two public subnets, IGW, SG,
+ASG `gateflow-dev-asg` running one t3.micro, ECS cluster
+`gateflow-dev-cluster`, service `gateflow-dev-svc`, log group
+`/ecs/gateflow-dev`. Verified over the public internet: HTTP 200,
+`Server: gunicorn`, body `{"message":"Hello from GateFlow","version":"dev"}`.
+The `dev` label proves APP_VERSION reached the container from the task
+definition (the app's own fallback is `v1`).
 
-Outstanding before Terraform can run:
-- AWS Budget alert not yet created.
-- ~~Credit balance / plan end date~~ DONE: ends **2026-09-27**, $119.72 left.
-- S3 state bucket + DynamoDB lock table not yet bootstrapped.
-- GitHub OIDC identity provider + IAM role not yet created in AWS.
-- Note: **AWS CloudShell is available on the Free Plan** - browser-based
-  shell with credentials pre-configured. Useful since the user installs
-  nothing locally.
-- From here on use a BRANCH + PR, not direct pushes to main, so the
-  `pull_request` gate in ci.yml actually gets exercised.
+Pipeline is now four jobs and fully green on main (run #16, 3m52s):
+build-and-verify -> terraform matrix (shared + dev) -> terraform-apply
+(shared) -> deploy-dev. deploy-dev applies, waits for ECS steady state,
+then SMOKE TESTS the deployment: looks up the instance IP, prints it to
+the job log, curls /health with retries, curls /, and asserts
+`"version":"dev"` in the response. Red if the app does not answer.
+
+`docs/knowledge-transfer.md` (586 lines, no code) is the plain-language
+build narrative + interview prep. **Keep it updated each session** - the
+user asked for this explicitly; update it on the feature branch so doc and
+code land on main together.
+
+Notes / gotchas learned:
+- The user's local network blocks outbound port 3000, so the deployed app
+  is unreachable from their laptop but fine from CloudShell and from GitHub
+  runners. NOT an AWS problem. Diagnostic: a cloud SG block drops packets
+  and curl hangs ~30s; a local block fails instantly ("Host unreachable"
+  in ~1ms). User said to ignore it; do NOT re-raise moving to port 80.
+- Task definitions are immutable, so any image tag change shows as
+  "must be replaced" (1 destroy) in the plan. That is NORMAL. When reading
+  plans, look at WHAT is destroyed, not the count.
+- User deletes local branches with `git branch -d` before the PR is merged;
+  `-d` only checks the commit exists on the remote, not that it reached
+  main. Warn before suggesting branch cleanup.
+
+Outstanding:
+- `.gitattributes` still not added (LF/CRLF). Becomes a real problem when
+  step 8 adds shell scripts: CRLF in a script run inside Linux fails with
+  `bash: No such file or directory`. Offered twice, not yet accepted.
+- CI role still has AdministratorAccess; narrows on day 8.
+- `.terraform.lock.hcl` still not committed.
+- Evidence capture into `docs/evidence/` still not done - the CloudShell
+  `curl -v` output, pipeline screenshots and EC2/ECS console views. Account
+  is DELETED 2026-09-27. This is urgent and keeps slipping.
+- Unit tests (`tests/`) still empty.
