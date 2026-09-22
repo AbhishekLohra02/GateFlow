@@ -289,6 +289,16 @@ jobs:
   # ---------------------------------------------------------------------
   deploy-dev:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    # Permissions for a reusable workflow are capped by the CALLER. The
+    # called workflow cannot grant itself more than this, which is why
+    # id-token: write has to be declared here as well as in deploy.yml -
+    # otherwise GitHub refuses the call outright rather than quietly
+    # downgrading it. That refusal is the feature: a reusable workflow you
+    # pulled in from somewhere else must not be able to escalate its access.
+    permissions:
+      id-token: write
+      contents: read
+
     needs: [terraform-apply]
     uses: ./.github/workflows/deploy.yml
     with:
@@ -306,6 +316,16 @@ jobs:
   # stops here.
   deploy-staging:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    # Permissions for a reusable workflow are capped by the CALLER. The
+    # called workflow cannot grant itself more than this, which is why
+    # id-token: write has to be declared here as well as in deploy.yml -
+    # otherwise GitHub refuses the call outright rather than quietly
+    # downgrading it. That refusal is the feature: a reusable workflow you
+    # pulled in from somewhere else must not be able to escalate its access.
+    permissions:
+      id-token: write
+      contents: read
+
     needs: [deploy-dev]
     uses: ./.github/workflows/deploy.yml
     with:
@@ -332,6 +352,16 @@ jobs:
   # ---------------------------------------------------------------------
   deploy-prod:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    # Permissions for a reusable workflow are capped by the CALLER. The
+    # called workflow cannot grant itself more than this, which is why
+    # id-token: write has to be declared here as well as in deploy.yml -
+    # otherwise GitHub refuses the call outright rather than quietly
+    # downgrading it. That refusal is the feature: a reusable workflow you
+    # pulled in from somewhere else must not be able to escalate its access.
+    permissions:
+      id-token: write
+      contents: read
+
     needs: [deploy-staging]
     uses: ./.github/workflows/deploy.yml
     with:
