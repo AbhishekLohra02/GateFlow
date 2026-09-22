@@ -15,7 +15,7 @@ keeps Phase 1 at genuinely $0 while still exercising real cloud infra.
 ```
  GitHub (public repo)
    │
-   ├─ PR opened ──► lint · unit tests · docker build · Trivy scan · terraform plan
+PR opened -> Docker build + container verification + Trivy scan + terraform plan -> (gate: PR checks must pass)
    │                (nothing merges unless all pass)
    │
    └─ merge to main
