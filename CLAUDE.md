@@ -236,10 +236,10 @@ session since /tmp is wiped.
 2. Terraform fundamentals; remote state backend (S3) + ECR repo. DONE
 3. Network module: VPC, public subnet, IGW, security group. DONE
 4. ECS module: cluster, EC2 capacity, task definition, service. DONE
-5. Replicate to staging/prod as separate stacks with separate state. <- HERE
-6. GitHub Actions: OIDC to AWS, PR checks workflow.
-7. Deploy pipeline: dev -> staging -> manual approval -> prod.
-8. Smoke tests, auto-rollback, AI PR-summary step (GitHub Models).
+5. Replicate to staging/prod as separate stacks with separate state. DONE
+6. GitHub Actions: OIDC to AWS, PR checks workflow. DONE (day 2)
+7. Deploy pipeline: dev -> staging -> manual approval -> prod. DONE
+8. Smoke tests DONE; auto-rollback + AI PR-summary still open. <- HERE
 9. Teardown, README, diagram.
 10. Interview prep.
 
@@ -254,50 +254,78 @@ a WSL2 install - rejected).
 - User connects **VS Code Desktop -> remote Codespace**.
 - Stop the Codespace when done; core-hours burn on wall-clock runtime.
 
-## Status as of 2026-09-19
+## Status as of 2026-09-22
 
-**Days 3-4 COMPLETE. The app is DEPLOYED AND SERVING on AWS.**
+**PHASE 1 IS FUNCTIONALLY COMPLETE.** Steps 1-7 done. Three environments are
+live and serving, promoted from one image, with a human approval gate in
+front of prod.
 
-Live in us-east-1: VPC `gateflow-dev-vpc`, two public subnets, IGW, SG,
-ASG `gateflow-dev-asg` running one t3.micro, ECS cluster
-`gateflow-dev-cluster`, service `gateflow-dev-svc`, log group
-`/ecs/gateflow-dev`. Verified over the public internet: HTTP 200,
-`Server: gunicorn`, body `{"message":"Hello from GateFlow","version":"dev"}`.
-The `dev` label proves APP_VERSION reached the container from the task
-definition (the app's own fallback is `v1`).
+Verified 2026-09-22 from CloudShell, all three from ONE image digest
+`e93f339c93ef09a46daed8bd07fac3e38f79f791`:
+```
+dev     (44.202.121.247) -> {"message":"Hello from GateFlow","version":"dev"}
+staging (18.212.5.161)   -> {"message":"Hello from GateFlow","version":"staging"}
+prod    (52.202.40.51)   -> {"message":"Hello from GateFlow","version":"prod"}
+```
 
-Pipeline is now four jobs and fully green on main (run #16, 3m52s):
-build-and-verify -> terraform matrix (shared + dev) -> terraform-apply
-(shared) -> deploy-dev. deploy-dev applies, waits for ECS steady state,
-then SMOKE TESTS the deployment: looks up the instance IP, prints it to
-the job log, curls /health with retries, curls /, and asserts
-`"version":"dev"` in the response. Red if the app does not answer.
+Live in us-east-1, three independent stacks with separate state keys:
+- dev     VPC 10.0.0.0/16, 1 instance, 1 task, logs 3d
+- staging VPC 10.1.0.0/16, 1 instance, 1 task, logs 7d
+- prod    VPC 10.2.0.0/16, **2 instances, 2 tasks**, logs 30d,
+          deployment_min_healthy=50 (rolling, no downtime),
+          deployment_circuit_breaker enabled with rollback
 
-`docs/knowledge-transfer.md` (586 lines, no code) is the plain-language
-build narrative + interview prep. **Keep it updated each session** - the
-user asked for this explicitly; update it on the feature branch so doc and
-code land on main together.
+Pipeline (ci.yml + reusable deploy.yml), all green on main:
+build-and-verify -> terraform matrix (shared/dev/staging/prod)
+-> terraform-apply (shared) -> deploy-dev -> deploy-staging
+-> **deploy-prod (PAUSES for required reviewer)**.
+Each deploy applies, waits for ECS steady state, then smoke tests: looks up
+the instance IP, curls /health with retries, curls /, and asserts the
+expected `version` string. Red if the app does not answer.
 
-Notes / gotchas learned:
-- The user's local network blocks outbound port 3000, so the deployed app
-  is unreachable from their laptop but fine from CloudShell and from GitHub
-  runners. NOT an AWS problem. Diagnostic: a cloud SG block drops packets
-  and curl hangs ~30s; a local block fails instantly ("Host unreachable"
-  in ~1ms). User said to ignore it; do NOT re-raise moving to port 80.
-- Task definitions are immutable, so any image tag change shows as
-  "must be replaced" (1 destroy) in the plan. That is NORMAL. When reading
-  plans, look at WHAT is destroyed, not the count.
-- User deletes local branches with `git branch -d` before the PR is merged;
-  `-d` only checks the commit exists on the remote, not that it reached
-  main. Warn before suggesting branch cleanup.
+The approval gate is a GitHub Environment protection rule on `prod`
+(required reviewers), NOT a workflow condition - so it cannot be removed by
+editing the pipeline. Same principle as the bootstrap/CI separation.
 
-Outstanding:
-- `.gitattributes` still not added (LF/CRLF). Becomes a real problem when
-  step 8 adds shell scripts: CRLF in a script run inside Linux fails with
-  `bash: No such file or directory`. Offered twice, not yet accepted.
-- CI role still has AdministratorAccess; narrows on day 8.
+**Gotcha learned day 5 - do not re-learn:** a reusable workflow cannot grant
+itself permissions. `deploy.yml` requested `id-token: write` but the calling
+jobs in ci.yml declared none, so GitHub REJECTED THE WHOLE FILE at parse
+time. Symptom: PR showed **"Checks: 0" with a green merge button** - nothing
+ran, and GitHub still offered to merge. Fix: declare `permissions` on the
+calling job too. Lesson: zero checks never means everything passed.
+
+Docs current: `docs/knowledge-transfer.md` (681 lines, no code, Days 1-5 +
+interview prep) and `docs/evidence/01-three-environment-promotion.md`.
+**Keep both updated each session - the user asked for this explicitly.**
+
+## Outstanding (2026-09-22) - deadline Sep 27, 5 days
+
+NEEDS AWS, hard deadline:
+- Screenshots into `docs/evidence/`: the approval gate PAUSED (best single
+  image in the project; re-run the workflow to catch it, or use Settings ->
+  Environments -> prod deployment history), the green six-job pipeline, ECS
+  console showing prod's two running tasks. Claude cannot create these.
+- Prometheus + Grafana Cloud (free tier, 10k series). App exposes /metrics,
+  Grafana Agent on the instances remote-writes out. Dashboards SURVIVE the
+  account deletion, which is why this is worth doing before Sep 27.
+- Auto-rollback when a post-deploy smoke test fails.
+- `terraform destroy` on all three envs before the account closes (optional -
+  the account is deleted anyway, but the teardown is worth demonstrating).
+
+NO DEADLINE, can run into October:
+- Unit tests - `tests/` is still empty.
+- SonarQube Cloud (free unlimited for public repos) - static analysis gate
+  on the PR, alongside Trivy. User specifically asked about this: German
+  DevOps postings want Grafana/Prometheus/SonarQube.
+- AI PR-summary step via GitHub Models (free, uses GITHUB_TOKEN).
+- Narrow the CI role from AdministratorAccess.
+- `.gitattributes` for LF/CRLF - offered 3x, still not accepted. Will bite
+  when shell scripts land.
 - `.terraform.lock.hcl` still not committed.
-- Evidence capture into `docs/evidence/` still not done - the CloudShell
-  `curl -v` output, pipeline screenshots and EC2/ECS console views. Account
-  is DELETED 2026-09-27. This is urgent and keeps slipping.
-- Unit tests (`tests/`) still empty.
+- Phase 2: Kubernetes on kind.
+
+## Resume-bullet status
+The bullets covering Terraform, Docker, AWS/OIDC, CI/CD gating, multi-env
+promotion, approval gates and rollback are NOW TRUE (rollback pending).
+Kubernetes/EKS bullets are still NOT true - Phase 2 has not started. Do not
+let those onto the resume until they are.

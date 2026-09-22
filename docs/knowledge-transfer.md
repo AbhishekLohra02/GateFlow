@@ -430,6 +430,101 @@ distinction is a useful thing to know.
 
 ---
 
+### Day 5 — Three environments, and the gate
+
+**What we set out to do:** replicate the working environment into staging and
+production, and put a human decision in front of production.
+
+**Why this is the real test of the earlier work:** up to now there was one
+environment, so the reusable components were reusable only in theory. Adding
+two more either takes a few dozen lines each, or it does not — and if it does
+not, the components were the wrong shape.
+
+It took about sixty lines per environment. The network component and the
+runtime component were both reused unchanged; only the parameters differ.
+
+#### What actually differs between environments
+
+Nothing about the application. Only configuration:
+
+| | dev | staging | production |
+|---|---|---|---|
+| network range | 10.0 | 10.1 | 10.2 |
+| servers / running copies | 1 / 1 | 1 / 1 | **2 / 2** |
+| deployment style | stop, then start | stop, then start | **rolling** |
+| log retention | 3 days | 7 days | 30 days |
+| deploys automatically | yes | yes | **only after approval** |
+
+Distinct network ranges are not strictly necessary today, since the three
+networks are isolated and could all use the same addresses. They are distinct
+because identical ranges cannot later be connected to each other — overlapping
+addresses cannot be routed between — and because identical addresses in three
+places make traffic logs ambiguous. Retrofitting this means rebuilding the
+network, so it is decided at the start.
+
+#### Production is the only one that deploys without downtime
+
+Everywhere else, the running copy binds a fixed port on a single machine. Two
+copies cannot hold the same port, so the old one must stop before the new one
+starts: a few seconds of unavailability on every deployment.
+
+Production runs two machines, so it can be told to keep at least half the
+capacity serving at all times. One copy is drained and replaced, checked, and
+only then is the other. Requests are served throughout.
+
+This is worth being able to explain precisely, because the cause is not
+obvious: the downtime elsewhere is a consequence of **port binding on a single
+host**, not a limitation of the orchestrator. With a load balancer assigning
+ports dynamically, even a single machine could deploy without downtime — which
+is exactly what the load balancer we chose not to pay for would have bought.
+
+#### The approval gate
+
+Production waits for a human. The pipeline reaches it, stops, and shows a
+reviewer prompt; nothing is applied until someone approves.
+
+The important detail is **where that rule lives**. It is not a condition in
+the pipeline code. It is configuration attached to the environment itself,
+set by a human in the project settings.
+
+That distinction is deliberate and is the same principle as keeping the
+bootstrap layer outside what the pipeline may modify: **the thing that
+controls access must not be modifiable by the thing it controls.** If the gate
+were a line in the pipeline file, anyone able to change that file could remove
+it. Because it lives on the environment, they cannot.
+
+#### One deployment definition, called three times
+
+The three deployments are identical in everything except which environment
+they target. Rather than three near-identical copies, the deployment is
+written once as a **reusable definition** and invoked three times with
+different parameters.
+
+The failure this avoids is specific and common: someone fixes a bug in the
+development deployment, forgets to apply the same fix to staging and
+production, and the environments quietly stop behaving the same way. At that
+point testing in one says nothing about the others, which removes the entire
+reason for having them.
+
+#### A mistake worth recording
+
+The first attempt failed before any job ran, with no checks appearing at all.
+The cause: a reusable definition cannot grant itself permissions. Whatever it
+requests is capped by whatever the caller allows, and the caller had allowed
+nothing. Rather than quietly downgrading the request, the platform rejected
+the whole file.
+
+That rejection is the correct behaviour — a reusable definition pulled in from
+elsewhere must not be able to escalate its own access. But it produced a
+confusing symptom: a pull request showing **zero checks** alongside a green,
+clickable merge button.
+
+The lesson generalises: **zero checks never means everything passed.** It
+means nothing ran, and something that reports nothing is far more dangerous
+than something that reports a failure.
+
+---
+
 ## 5. How a change flows through the system, end to end
 
 1. A developer changes the application and opens a pull request.
