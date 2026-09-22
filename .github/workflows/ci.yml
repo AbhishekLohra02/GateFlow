@@ -156,6 +156,12 @@ jobs:
           - name: dev
             stack: terraform/environments/dev
             tf_vars: -var=image_tag=${{ github.sha }}
+          - name: staging
+            stack: terraform/environments/staging
+            tf_vars: -var=image_tag=${{ github.sha }}
+          - name: prod
+            stack: terraform/environments/prod
+            tf_vars: -var=image_tag=${{ github.sha }}
 
     # Least privilege, declared per job rather than per workflow.
     #
@@ -271,139 +277,97 @@ jobs:
         run: terraform output
 
   # ---------------------------------------------------------------------
-  # Deploy to DEV. main only, after shared has applied.
+  # PROMOTION. main only.
   #
-  # This is the job that actually puts the app on AWS: VPC, EC2 capacity and
-  # the ECS service, with the task definition pointing at the image this
-  # very commit built and pushed.
+  # The same image tag - this commit's SHA - flows through all three
+  # environments. Nothing is rebuilt between them. The bytes that passed
+  # dev are the bytes that reach prod, which is the only thing that makes
+  # testing in dev say anything about prod.
+  #
+  # `needs` makes the chain sequential. Without it all three would deploy in
+  # parallel and prod would ship code that had never been proven anywhere.
   # ---------------------------------------------------------------------
   deploy-dev:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-
-    # terraform-apply already required build-and-verify, so the ECR push has
-    # happened by the time this runs. Without that ordering the task
-    # definition would name an image tag that does not exist yet and the
-    # task would sit in PENDING forever.
-    needs: [terraform-apply]
-
-    runs-on: ubuntu-latest
-
-    # Names a GitHub Environment. Today it only labels the deployment in the
-    # UI - but this is the hook that will later carry the required-reviewer
-    # approval gate on prod.
-    environment: dev
-
+    # Permissions for a reusable workflow are capped by the CALLER. The
+    # called workflow cannot grant itself more than this, which is why
+    # id-token: write has to be declared here as well as in deploy.yml -
+    # otherwise GitHub refuses the call outright rather than quietly
+    # downgrading it. That refusal is the feature: a reusable workflow you
+    # pulled in from somewhere else must not be able to escalate its access.
     permissions:
       id-token: write
       contents: read
 
-    concurrency:
-      group: terraform-apply-dev
-      cancel-in-progress: false
+    needs: [terraform-apply]
+    uses: ./.github/workflows/deploy.yml
+    with:
+      environment: dev
+      stack: terraform/environments/dev
+      name_prefix: gateflow-dev
+      image_tag: ${{ github.sha }}
+      expected_version: dev
+    # Reusable workflows do NOT inherit secrets automatically - a called
+    # workflow gets nothing unless it is passed. `inherit` hands over the
+    # caller's secrets, which is what lets it assume the AWS role.
+    secrets: inherit
 
-    defaults:
-      run:
-        working-directory: terraform/environments/dev
+  # Only runs if dev deployed AND its smoke test passed. A broken build
+  # stops here.
+  deploy-staging:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    # Permissions for a reusable workflow are capped by the CALLER. The
+    # called workflow cannot grant itself more than this, which is why
+    # id-token: write has to be declared here as well as in deploy.yml -
+    # otherwise GitHub refuses the call outright rather than quietly
+    # downgrading it. That refusal is the feature: a reusable workflow you
+    # pulled in from somewhere else must not be able to escalate its access.
+    permissions:
+      id-token: write
+      contents: read
 
-    steps:
-      - uses: actions/checkout@v4
+    needs: [deploy-dev]
+    uses: ./.github/workflows/deploy.yml
+    with:
+      environment: staging
+      stack: terraform/environments/staging
+      name_prefix: gateflow-staging
+      image_tag: ${{ github.sha }}
+      expected_version: staging
+    secrets: inherit
 
-      - name: Configure AWS credentials via OIDC
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
+  # ---------------------------------------------------------------------
+  # PRODUCTION - THE APPROVAL GATE.
+  #
+  # Nothing in this job definition pauses it. The pause comes from the
+  # `prod` GitHub Environment having "Required reviewers" configured: the
+  # job is held before its first step runs until a human approves it in the
+  # Actions UI.
+  #
+  # Deliberately NOT a workflow condition or an input. Keeping the gate as
+  # environment configuration rather than code means changing who may
+  # approve production does not require a pull request to the pipeline -
+  # and, more importantly, someone cannot remove the gate by editing this
+  # file, because the rule lives on the environment, not here.
+  # ---------------------------------------------------------------------
+  deploy-prod:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    # Permissions for a reusable workflow are capped by the CALLER. The
+    # called workflow cannot grant itself more than this, which is why
+    # id-token: write has to be declared here as well as in deploy.yml -
+    # otherwise GitHub refuses the call outright rather than quietly
+    # downgrading it. That refusal is the feature: a reusable workflow you
+    # pulled in from somewhere else must not be able to escalate its access.
+    permissions:
+      id-token: write
+      contents: read
 
-      - uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_version: "1.16.3"
-
-      - name: Init
-        run: terraform init
-
-      # The image tag IS the deployment. Same SHA the build job pushed.
-      - name: Apply
-        run: terraform apply -auto-approve -input=false -var="image_tag=${{ github.sha }}"
-
-      - name: Show outputs
-        run: terraform output
-
-      # ECS is ASYNCHRONOUS: apply returns as soon as the service is
-      # updated, not when the new task is actually running. Without this the
-      # job would go green while the container is still pulling - or crash
-      # looping. This blocks until the service reaches steady state, which
-      # turns "deployed" into something the pipeline has actually verified.
-      - name: Wait for the ECS service to stabilise
-        run: |
-          aws ecs wait services-stable \
-            --cluster "$(terraform output -raw cluster_name)" \
-            --services "$(terraform output -raw service_name)" \
-            --region "${AWS_REGION}"
-          echo "service reached steady state"
-
-      # SMOKE TEST: prove the deployment actually serves traffic.
-      #
-      # "The service reached steady state" only means ECS is satisfied. It
-      # does not mean the app is reachable from outside - a wrong security
-      # group rule, a missing route, or an app listening on the wrong
-      # interface would all still report steady. The only way to know is to
-      # call it from off the machine, which is what this does.
-      #
-      # There is no load balancer, so there is no stable DNS name: the
-      # address is looked up fresh each time because it changes whenever the
-      # ASG replaces the instance.
-      - name: Smoke test the deployment
-        run: |
-          ip=$(aws ec2 describe-instances \
-            --filters 'Name=tag:Name,Values=gateflow-dev-ecs-instance' \
-                      'Name=instance-state-name,Values=running' \
-            --query 'Reservations[].Instances[].PublicIpAddress' \
-            --output text --region "${AWS_REGION}")
-
-          if [ -z "${ip}" ] || [ "${ip}" = "None" ]; then
-            echo "::error::no running instance found - the ASG may not have launched one"
-            exit 1
-          fi
-
-          # Printed to the LOG, not just the run summary. Summaries are easy
-          # to miss and impossible to grep; the log is where you actually look.
-          echo "=================================================="
-          echo "  DEV IS DEPLOYED AT:  http://${ip}:3000"
-          echo "  HEALTH:              http://${ip}:3000/health"
-          echo "=================================================="
-
-          # The instance may accept connections a moment before the container
-          # is serving, so retry rather than failing on a single attempt.
-          for i in $(seq 1 10); do
-            if curl -fsS --max-time 5 "http://${ip}:3000/health" >/dev/null; then
-              echo "health check passed on attempt ${i}"
-              break
-            fi
-            if [ "${i}" = "10" ]; then
-              echo "::error::app is not reachable at http://${ip}:3000/health"
-              exit 1
-            fi
-            sleep 5
-          done
-
-          body=$(curl -fsS --max-time 5 "http://${ip}:3000")
-          echo "response: ${body}"
-
-          # Assert the environment variable actually reached the container.
-          # This is what proves config comes from the task definition rather
-          # than being baked into the image - the same image returns a
-          # different value in every environment.
-          echo "${body}" | grep -q '"version":"dev"' || {
-            echo "::error::expected version 'dev' in response, got: ${body}"
-            exit 1
-          }
-          echo "confirmed: APP_VERSION reached the container as 'dev'"
-
-          {
-            echo "### Dev deployed and smoke tested"
-            echo ""
-            echo "- http://${ip}:3000"
-            echo "- http://${ip}:3000/health"
-            echo ""
-            echo "Response: \`${body}\`"
-          } >> $GITHUB_STEP_SUMMARY
+    needs: [deploy-staging]
+    uses: ./.github/workflows/deploy.yml
+    with:
+      environment: prod
+      stack: terraform/environments/prod
+      name_prefix: gateflow-prod
+      image_tag: ${{ github.sha }}
+      expected_version: prod
+    secrets: inherit

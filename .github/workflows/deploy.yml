@@ -1,0 +1,154 @@
+# A REUSABLE workflow. It is never triggered directly - `workflow_call`
+# means another workflow invokes it, passing inputs.
+#
+# Why this exists: dev, staging and prod deploy identically. The only
+# differences are which stack directory to apply, which GitHub Environment
+# to record the deployment against, and what the resources are named.
+#
+# The alternative is three near-identical 60-line jobs in ci.yml. That is
+# how pipelines rot: someone fixes a bug in the dev job, forgets staging,
+# and the environments quietly stop behaving the same way - which destroys
+# the entire premise of testing in one before shipping to another.
+name: Deploy
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: "GitHub Environment name - also carries any approval rules."
+        required: true
+        type: string
+      stack:
+        description: "Terraform stack directory to apply."
+        required: true
+        type: string
+      name_prefix:
+        description: "Resource name prefix, used to find the instance for the smoke test."
+        required: true
+        type: string
+      image_tag:
+        description: "Image tag to deploy. The same commit SHA flows through every environment."
+        required: true
+        type: string
+      expected_version:
+        description: "Value APP_VERSION must have in the response, proving config reached the container."
+        required: true
+        type: string
+
+env:
+  AWS_REGION: us-east-1
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    # This is the approval gate.
+    #
+    # Naming a GitHub Environment here means any protection rules attached
+    # to it apply before this job starts. With "Required reviewers" set on
+    # the prod environment, the job PAUSES and waits for a human to approve
+    # in the Actions UI. Nothing in this file changes between environments -
+    # the gate is configuration on the environment, not code.
+    environment: ${{ inputs.environment }}
+
+    permissions:
+      id-token: write
+      contents: read
+
+    # One deployment per environment at a time. cancel-in-progress stays
+    # FALSE: killing a terraform apply midway leaves resources created but
+    # unrecorded in state, which is worse than waiting.
+    concurrency:
+      group: deploy-${{ inputs.environment }}
+      cancel-in-progress: false
+
+    defaults:
+      run:
+        working-directory: ${{ inputs.stack }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.16.3"
+
+      - name: Init
+        run: terraform init
+
+      - name: Apply
+        run: terraform apply -auto-approve -input=false -var="image_tag=${{ inputs.image_tag }}"
+
+      - name: Show outputs
+        run: terraform output
+
+      # ECS is asynchronous: apply returns once the service is UPDATED, not
+      # once the new task is running. Without this the job would go green
+      # while the container was still pulling - or crash looping.
+      - name: Wait for the ECS service to stabilise
+        run: |
+          aws ecs wait services-stable \
+            --cluster "$(terraform output -raw cluster_name)" \
+            --services "$(terraform output -raw service_name)" \
+            --region "${AWS_REGION}"
+          echo "service reached steady state"
+
+      # SMOKE TEST. "Steady state" only means ECS is satisfied - it does not
+      # mean the app is reachable. A wrong firewall rule, a missing route or
+      # an app bound to the wrong interface would all still report steady.
+      # The only way to know is to call it from outside.
+      - name: Smoke test
+        run: |
+          ip=$(aws ec2 describe-instances \
+            --filters "Name=tag:Name,Values=${{ inputs.name_prefix }}-ecs-instance" \
+                      'Name=instance-state-name,Values=running' \
+            --query 'Reservations[].Instances[].PublicIpAddress' \
+            --output text --region "${AWS_REGION}" | tr '\t' '\n' | head -1)
+
+          if [ -z "${ip}" ] || [ "${ip}" = "None" ]; then
+            echo "::error::no running instance found for ${{ inputs.name_prefix }}"
+            exit 1
+          fi
+
+          echo "=================================================="
+          echo "  ${{ inputs.environment }} IS DEPLOYED AT:  http://${ip}:3000"
+          echo "=================================================="
+
+          for i in $(seq 1 12); do
+            if curl -fsS --max-time 5 "http://${ip}:3000/health" >/dev/null; then
+              echo "health check passed on attempt ${i}"
+              break
+            fi
+            if [ "${i}" = "12" ]; then
+              echo "::error::app not reachable at http://${ip}:3000/health"
+              exit 1
+            fi
+            sleep 5
+          done
+
+          body=$(curl -fsS --max-time 5 "http://${ip}:3000")
+          echo "response: ${body}"
+
+          # Proves configuration reached the container from the task
+          # definition rather than the app falling back to its built-in
+          # default - the same image must report a different value here in
+          # every environment.
+          echo "${body}" | grep -q "\"version\":\"${{ inputs.expected_version }}\"" || {
+            echo "::error::expected version '${{ inputs.expected_version }}', got: ${body}"
+            exit 1
+          }
+          echo "confirmed: APP_VERSION reached the container as '${{ inputs.expected_version }}'"
+
+          {
+            echo "### ${{ inputs.environment }} deployed and smoke tested"
+            echo ""
+            echo "- http://${ip}:3000"
+            echo "- Image tag: \`${{ inputs.image_tag }}\`"
+            echo "- Response: \`${body}\`"
+          } >> $GITHUB_STEP_SUMMARY
