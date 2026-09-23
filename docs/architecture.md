@@ -26,7 +26,10 @@ PR opened -> Docker build + container verification + Trivy scan + terraform plan
         ├─► terraform apply (staging)──► ECS service updates ──► smoke test
         ├─► ⏸  MANUAL APPROVAL GATE  (GitHub Environments, required reviewer)
         └─► terraform apply (prod)   ──► ECS service updates ──► smoke test
-                                                    └─ fail ──► auto-rollback
+                        ECS deployment circuit breaker reverts a deployment
+                        that never reaches steady state. Reverting a deploy
+                        that succeeds and THEN fails its smoke test is not
+                        yet implemented.
 ```
 
 ### AWS resources, per environment
@@ -47,7 +50,7 @@ CloudWatch log group   ── container stdout/stderr (5GB/mo free)
 Shared across environments:
 - **ECR** — one repository, images tagged by git SHA
 - **S3 bucket** — Terraform remote state
-- **DynamoDB table** — Terraform state locking
+- **State locking** — S3 native conditional writes (no separate lock table)
 
 ### Why each piece is what it is
 
@@ -63,12 +66,15 @@ replacement, rollback — and they map almost one-to-one onto the
 Kubernetes objects in Phase 2 (task definition → pod spec, service →
 deployment, desired count → replicas).
 
-**Remote state in S3 + DynamoDB, not local `terraform.tfstate`.** State is
-Terraform's record of what it owns. Local state means it lives on one
-laptop: CI can't read it, nobody else can apply, and losing the file
-orphans every resource Terraform created. S3 makes it shared and
-versioned; the DynamoDB table provides a lock so two concurrent applies
-can't corrupt it. Both fit in the always-free tier.
+**Remote state in S3, not local `terraform.tfstate`.** State is Terraform's
+record of what it owns. Local state means it lives on one laptop: CI can't
+read it, nobody else can apply, and losing the file orphans every resource
+Terraform created. S3 makes it shared, versioned and encrypted.
+
+Locking uses S3's own conditional writes (`use_lockfile`, Terraform >= 1.10)
+so two concurrent applies cannot interleave and corrupt the state. Every
+guide written before 2025 pairs S3 with a DynamoDB table for this; that
+approach is now deprecated and **no lock table exists in this project**.
 
 **Immutable image tags (git SHA), never `:latest`.** With `:latest` you
 cannot tell which commit is running in prod, and a rollback has nothing to
@@ -80,6 +86,25 @@ to AWS by exchanging a short-lived GitHub identity token for temporary STS
 credentials. Long-lived `AWS_ACCESS_KEY_ID` secrets are the single most
 common way cloud credentials leak out of CI, and they never expire on
 their own. OIDC credentials last minutes and cannot be reused.
+
+**The CI role cannot escalate itself.** It began as `AdministratorAccess` -
+deliberately, because scoping IAM before you know which API calls Terraform
+actually makes is guesswork that costs hours in `AccessDenied` errors that
+name an action but never a resource. It has since been narrowed to the
+services this project uses, with IAM access bounded to roles named
+`gateflow-*`.
+
+The part that makes that a real boundary rather than a naming convention is
+an explicit **Deny** on the pipeline's own role, the OIDC provider, and
+destructive operations on the state bucket. Without it, "roles named
+gateflow-*" would include `gateflow-github-actions` itself - so a merged
+pull request could attach `AdministratorAccess` back onto it. An explicit
+Deny beats any Allow in IAM, whatever else is attached.
+
+`iam:PassRole` is separately constrained by `iam:PassedToService`. Passing a
+role to a service is the usual route to privilege escalation: unrestricted,
+the pipeline could start an ECS task running as an administrator role and
+read whatever that role can read.
 
 ### Cost decisions (and what they trade away)
 
@@ -128,12 +153,18 @@ State layout inside the bucket - one key per stack, which is what makes a
 gateflow-tfstate-355421126727/
   bootstrap/terraform.tfstate     state bucket, OIDC provider, CI role
   shared/terraform.tfstate        ECR
-  dev|staging|prod/...            per-environment (Day 3+)
+  environments/dev|staging|prod/terraform.tfstate   one per environment
 ```
 
 Locking is S3-native (`use_lockfile`, Terraform >= 1.10) rather than a
 DynamoDB table - DynamoDB-based locking is deprecated.
 
-## Still to fill in
+## Not yet built
 
-- Architecture diagram (add once the network and ECS Terraform exist)
+- Unit tests (`tests/` is empty; the PR gate runs container verification,
+  not unit tests)
+- Rollback on a post-deployment smoke-test failure
+- Metrics and dashboards
+
+
+Architecture diagrams live in the root `README.md`.

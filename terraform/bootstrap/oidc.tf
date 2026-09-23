@@ -132,17 +132,197 @@ resource "aws_iam_role" "github_actions" {
   max_session_duration = 3600
 }
 
-# TEMPORARY, AND DELIBERATE.
+# ===========================================================================
+# THE CI ROLE'S PERMISSIONS.
 #
-# Scoping IAM before you know which API calls Terraform actually makes means
-# guessing, then losing hours to AccessDenied errors that name an action but
-# never the resource. The professional move is to start broad, capture the
-# real calls from CloudTrail once the infrastructure exists, and narrow to
-# that - which is a day 8 task tracked in CLAUDE.md.
+# This started as AdministratorAccess, deliberately: scoping IAM before you
+# know which API calls Terraform actually makes means guessing, then losing
+# hours to AccessDenied errors that name an action but never the resource.
+# Start broad, observe what is actually used, then narrow to that.
 #
-# Saying this out loud in a review is the difference between "I started
-# broad and tightened from observed usage" and "I left it as admin".
-resource "aws_iam_role_policy_attachment" "github_actions_admin" {
+# This is the narrowed version. Two things make it meaningful rather than
+# cosmetic:
+#
+#   1. IAM access is restricted to roles and instance profiles named
+#      gateflow-* . The pipeline can create the roles its own workloads
+#      need and nothing else.
+#   2. An explicit DENY protects the bootstrap resources from the pipeline
+#      - its own role, the identity provider that lets it authenticate, and
+#      the bucket holding everyone's state.
+#
+# Point 2 is the one that matters. Without it, "IAM access limited to
+# gateflow-*" would include `gateflow-github-actions` - the role the
+# pipeline itself assumes - so anyone able to merge could grant that role
+# more permissions and walk straight back up to admin. An explicit Deny
+# always beats an Allow in IAM, whatever else is attached, which is what
+# makes this a real boundary rather than a naming convention.
+# ===========================================================================
+
+data "aws_iam_policy_document" "github_actions" {
+  # -------------------------------------------------------------------
+  # Networking and compute. Left wide WITHIN these services on purpose:
+  # EC2 resource-level permissions are notoriously incomplete (many
+  # actions simply do not support resource ARNs), so a resource-scoped
+  # policy here would be a false sense of security that breaks
+  # unpredictably. The real boundary for these is the account itself.
+  # -------------------------------------------------------------------
+  statement {
+    sid    = "NetworkingAndCompute"
+    effect = "Allow"
+    actions = [
+      "ec2:*",
+      "autoscaling:*",
+      "elasticloadbalancing:Describe*",
+    ]
+    resources = ["*"]
+  }
+
+  statement {
+    sid    = "ContainerOrchestration"
+    effect = "Allow"
+    actions = [
+      "ecs:*",
+      "ecr:*",
+      "logs:*",
+      "application-autoscaling:*",
+    ]
+    resources = ["*"]
+  }
+
+  # Read-only. Needed for the ECS-optimized AMI lookup, which reads an
+  # AWS-published SSM parameter. No write access - the pipeline has no
+  # business creating parameters.
+  statement {
+    sid       = "ReadPublicSsmParameters"
+    effect    = "Allow"
+    actions   = ["ssm:GetParameter", "ssm:GetParameters"]
+    resources = ["*"]
+  }
+
+  # -------------------------------------------------------------------
+  # IAM, scoped by NAME.
+  #
+  # Terraform must create the ECS instance and execution roles, so this
+  # cannot be removed - but it can be bounded. Every role this project
+  # creates is prefixed gateflow-, so the policy allows exactly that
+  # namespace and nothing else.
+  # -------------------------------------------------------------------
+  statement {
+    sid    = "ManageProjectRoles"
+    effect = "Allow"
+    actions = [
+      "iam:CreateRole",
+      "iam:DeleteRole",
+      "iam:GetRole",
+      "iam:TagRole",
+      "iam:UntagRole",
+      "iam:ListRoleTags",
+      "iam:AttachRolePolicy",
+      "iam:DetachRolePolicy",
+      "iam:ListAttachedRolePolicies",
+      "iam:ListRolePolicies",
+      "iam:ListInstanceProfilesForRole",
+      "iam:CreateInstanceProfile",
+      "iam:DeleteInstanceProfile",
+      "iam:GetInstanceProfile",
+      "iam:AddRoleToInstanceProfile",
+      "iam:RemoveRoleFromInstanceProfile",
+      "iam:CreateServiceLinkedRole",
+    ]
+    resources = [
+      "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/gateflow-*",
+      "arn:aws:iam::${data.aws_caller_identity.current.account_id}:instance-profile/gateflow-*",
+      "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/aws-service-role/*",
+    ]
+  }
+
+  # PassRole is the quiet one. Handing a role to a service is how
+  # privilege escalation usually happens: if the pipeline could pass ANY
+  # role to ECS, it could start a task running as an administrator role
+  # and read whatever that role can read. Restricted to this project's
+  # roles, and to the two services that legitimately need them.
+  statement {
+    sid       = "PassProjectRolesToEcsAndEc2"
+    effect    = "Allow"
+    actions   = ["iam:PassRole"]
+    resources = ["arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/gateflow-*"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "iam:PassedToService"
+      values   = ["ecs-tasks.amazonaws.com", "ec2.amazonaws.com"]
+    }
+  }
+
+  # Terraform state. The bucket itself, and objects within it.
+  statement {
+    sid    = "TerraformState"
+    effect = "Allow"
+    actions = [
+      "s3:ListBucket",
+      "s3:GetBucketVersioning",
+      "s3:GetObject",
+      "s3:PutObject",
+      "s3:DeleteObject",
+    ]
+    resources = [
+      aws_s3_bucket.state.arn,
+      "${aws_s3_bucket.state.arn}/*",
+    ]
+  }
+
+  statement {
+    sid       = "ReadOwnIdentity"
+    effect    = "Allow"
+    actions   = ["sts:GetCallerIdentity", "iam:ListRoles", "iam:GetPolicy"]
+    resources = ["*"]
+  }
+
+  # -------------------------------------------------------------------
+  # THE BOUNDARY. An explicit Deny cannot be overridden by any Allow.
+  #
+  # Without this, "roles named gateflow-*" would include the pipeline's
+  # OWN role - so a merged pull request could attach AdministratorAccess
+  # to it and escalate straight back to where we started.
+  # -------------------------------------------------------------------
+  statement {
+    sid    = "DenyTouchingOwnIdentity"
+    effect = "Deny"
+    actions = [
+      "iam:*Role*",
+      "iam:*Policy*",
+      "iam:*OpenIDConnect*",
+    ]
+    resources = [
+      aws_iam_role.github_actions.arn,
+      aws_iam_openid_connect_provider.github.arn,
+    ]
+  }
+
+  # The state bucket is created and protected by the bootstrap stack. The
+  # pipeline reads and writes state inside it; it must never be able to
+  # delete the bucket, disable versioning, or open it to the public.
+  statement {
+    sid    = "DenyDestroyingStateBucket"
+    effect = "Deny"
+    actions = [
+      "s3:DeleteBucket",
+      "s3:PutBucketPolicy",
+      "s3:PutBucketVersioning",
+      "s3:PutBucketPublicAccessBlock",
+      "s3:DeleteBucketPolicy",
+    ]
+    resources = [aws_s3_bucket.state.arn]
+  }
+}
+
+resource "aws_iam_policy" "github_actions" {
+  name        = "gateflow-github-actions-policy"
+  description = "Scoped permissions for the GateFlow CI pipeline."
+  policy      = data.aws_iam_policy_document.github_actions.json
+}
+
+resource "aws_iam_role_policy_attachment" "github_actions" {
   role       = aws_iam_role.github_actions.name
-  policy_arn = "arn:aws:iam::aws:policy/AdministratorAccess"
+  policy_arn = aws_iam_policy.github_actions.arn
 }

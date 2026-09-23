@@ -1,0 +1,20 @@
+# Normalise line endings.
+#
+# Windows checkouts get CRLF, the repository always stores LF. Without this,
+# a shell script authored on Windows arrives in a Linux container with CRLF
+# line endings and fails with `bash\r: No such file or directory` - an error
+# that names neither the file nor the real cause.
+* text=auto eol=lf
+
+# Files that MUST be LF regardless of platform, because something on Linux
+# executes them directly.
+*.sh   text eol=lf
+*.yml  text eol=lf
+*.yaml text eol=lf
+*.tf   text eol=lf
+*.py   text eol=lf
+Dockerfile text eol=lf
+
+# Never touched.
+*.png binary
+*.jpg binary
