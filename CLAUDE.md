@@ -207,7 +207,7 @@ both PR jobs) created ECR
 merge applies - that asymmetry is the gate.
 
 Open: `.terraform.lock.hcl` is still not committed (CI regenerates it each
-run); CI role still has AdministratorAccess, narrows on Day 8.
+run). CI role was narrowed off AdministratorAccess on 2026-09-23.
 Account ID `355421126727`.
 
 **Two OIDC gotchas that cost real time - do not re-learn these:**
@@ -318,11 +318,38 @@ NO DEADLINE, can run into October:
   on the PR, alongside Trivy. User specifically asked about this: German
   DevOps postings want Grafana/Prometheus/SonarQube.
 - AI PR-summary step via GitHub Models (free, uses GITHUB_TOKEN).
-- Narrow the CI role from AdministratorAccess.
-- `.gitattributes` for LF/CRLF - offered 3x, still not accepted. Will bite
-  when shell scripts land.
 - `.terraform.lock.hcl` still not committed.
 - Phase 2: Kubernetes on kind.
+
+## Security hardening DONE 2026-09-23
+
+**CI role no longer has AdministratorAccess.** Replaced with
+`gateflow-github-actions-policy` (see `terraform/bootstrap/oidc.tf`):
+- Allow: `ec2:*`, `autoscaling:*`, `ecs:*`, `ecr:*`, `logs:*`,
+  `ssm:GetParameter*`, S3 limited to the state bucket.
+- IAM actions bounded to `role/gateflow-*` and
+  `instance-profile/gateflow-*` only.
+- `iam:PassRole` additionally conditioned on `iam:PassedToService` being
+  `ecs-tasks.amazonaws.com` or `ec2.amazonaws.com` - unrestricted PassRole
+  is the usual privilege-escalation route.
+- **Explicit Deny** on `iam:*Role*`/`*Policy*`/`*OpenIDConnect*` against the
+  CI role's own ARN and the OIDC provider, plus Deny on destructive S3
+  actions against the state bucket. Without the Deny, "roles named
+  gateflow-*" would include `gateflow-github-actions` itself, so a merged
+  PR could re-attach admin. An explicit Deny beats any Allow in IAM.
+
+Applied by hand from CloudShell (bootstrap is never CI-applied, by design).
+Recovery if the policy proves too tight:
+`aws iam attach-role-policy --role-name gateflow-github-actions
+--policy-arn arn:aws:iam::aws:policy/AdministratorAccess`
+
+**Branch protection / ruleset is ACTIVE on `main`**: PR required (0
+approvals - solo repo, cannot self-approve), the five PR checks required,
+force pushes and deletions blocked. Do NOT add the deploy jobs as required
+checks - they skip on PRs and a required check that never runs blocks the
+merge forever.
+
+`.gitattributes` added (LF enforced for sh/yml/tf/py/Dockerfile).
 
 ## Resume-bullet status
 The bullets covering Terraform, Docker, AWS/OIDC, CI/CD gating, multi-env
